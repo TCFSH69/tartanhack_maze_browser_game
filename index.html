@@ -725,23 +725,23 @@ flashBtn.addEventListener('click', () => {
     flashBtn.disabled = true;
     flashActive = true;
 
-    // 馬上全白閃光
+    // 馬上全白閃光 + AppLovin
     flashOverlay.style.display = 'flex';
     flashOverlay.style.background = '#fff';
     flashOverlay.style.opacity = '1';
     flashOverlay.className = '';
 
-    // 短暫全白後，AppLovin 淡入
     setTimeout(() => {
         flashOverlay.classList.add('show-ad');
-        // 1 秒後自動 fade out
+        // 1 秒後 fade out AppLovin，秀地圖
         setTimeout(() => {
             flashOverlay.classList.add('fade-out');
             flashOverlay.addEventListener('transitionend', function handler() {
                 flashOverlay.removeEventListener('transitionend', handler);
                 flashOverlay.style.display = 'none';
                 flashOverlay.className = '';
-                flashActive = false;
+                // 霧關著，秀地圖 3 秒
+                setTimeout(() => { flashActive = false; }, 3000);
             });
         }, 1000);
     }, 500);
