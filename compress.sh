@@ -1,2 +1,2 @@
-tar -cvf game.tar index.html
+tar -cvf game.tar *.html beast.mp3 *.webp
 gzip -9 game.tar
