@@ -1,248 +1,203 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <style>
-        body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; touch-action: none; }
-        canvas { display: block; }
-        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; }
-        #start-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 20px; font-size: 20px; background: #0f0; color: #000; border: none; cursor: pointer; }
-    </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <style>
+    body { margin:0; overflow:hidden; background:#000; color:#fff; font-family:sans-serif; touch-action:none; }
+    canvas { display:block; }
+    #ui { position:absolute; top:10px; left:10px; z-index:10; pointer-events:none; }
+    #start-btn { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); padding:20px; font-size:20px; background:#0f0; color:#000; border:0; cursor:pointer; }
+  </style>
 </head>
 <body>
-    <div id="ui">Mic Level: <span id="mic-val">0</span> | Steps: <span id="steps">0</span></div>
-    <button id="start-btn">Start Game (Allow Mic)</button>
-    <canvas id="gameCanvas"></canvas>
+  <div id="ui">Mic: <span id="mic-val">0</span></div>
+  <button id="start-btn">Start (Allow Mic)</button>
+  <canvas id="gameCanvas"></canvas>
 
 <script>
-// --- 1. 初始化設定 ---
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const uiMic = document.getElementById('mic-val');
-let mapWidth = 100;
-let mapHeight = 100;
-let tileSize = 20; // 每個格子的像素大小
-let map = []; // 0=Wall, 1=Floor
-let player = { x: 1, y: 1, dirX: 0, dirY: 0 }; // dir紀錄最後移動方向
-let goal = { x: 0, y: 0 };
-let micLevel = 0; // 量化後的音量 0-10
+
+let mapW=100, mapH=100, tile=20;
+let map=[];
+let player={x:1,y:1,dirX:0,dirY:1};
+
 let audioContext, analyser, dataArray;
-let camera = { x: 0, y: 0 }; // 鏡頭位置
+let micLevel=0;   // 0..10 display
+let loud=0;       // 0..1 smoothed
+let beamLen=0, beamLife=0;
+const BEAM_LIFE_MAX=14;
 
-// --- 2. 地圖生成 (用程式生成代替 Hardcode 以節省空間) ---
-// 如果真的要 Hardcode 100*100 array，會佔 20KB 文字量，會爆掉限制。
-// 這裡用簡單的演算法生成一個圍牆地圖
-function generateMap() {
-    map = [];
-    for (let y = 0; y < mapHeight; y++) {
-        let row = [];
-        for (let x = 0; x < mapWidth; x++) {
-            // 邊緣是牆(0)，隨機生成障礙物
-            if (x === 0 || x === mapWidth - 1 || y === 0 || y === mapHeight - 1 || Math.random() < 0.2) {
-                row.push(0); 
-            } else {
-                row.push(1);
-            }
-        }
-        map.push(row);
+// Colors
+const FLOOR = "#2a2a2a";
+const WALL  = "#6a6a6a";
+const BEAM  = "#ffd400"; // yellow
+
+function resize(){ canvas.width=innerWidth; canvas.height=innerHeight; }
+addEventListener('resize', resize); resize();
+
+/* Map */
+function genMap(){
+  map=[];
+  for(let y=0;y<mapH;y++){
+    let r=[];
+    for(let x=0;x<mapW;x++){
+      r.push((x==0||y==0||x==mapW-1||y==mapH-1||Math.random()<0.2)?0:1);
     }
-    // 確保起點是空的
-    map[1][1] = 1;
-    player.x = 1; player.y = 1;
-    
-    // 生成終點 (簡單找一個不是牆的地方)
-    while(true) {
-        let gx = Math.floor(Math.random() * mapWidth);
-        let gy = Math.floor(Math.random() * mapHeight);
-        if (map[gy][gx] === 1 && (gx > 10 || gy > 10)) { // 離起點遠一點
-            goal = {x: gx, y: gy};
-            break;
-        }
-    }
+    map.push(r);
+  }
+  for(let yy=1;yy<=3;yy++) for(let xx=1;xx<=3;xx++) map[yy][xx]=1;
+  player.x=1; player.y=1; player.dirX=0; player.dirY=1;
 }
 
-// --- 3. 麥克風與音訊處理 ---
-async function initAudio() {
-    try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        analyser = audioContext.createAnalyser();
-        const source = audioContext.createMediaStreamSource(stream);
-        source.connect(analyser);
-        analyser.fftSize = 256;
-        dataArray = new Uint8Array(analyser.frequencyBinCount);
-        document.getElementById('start-btn').style.display = 'none';
-        gameLoop();
-    } catch (e) {
-        alert("Microphone access denied! Game needs mic.");
-    }
+/* Audio */
+async function initAudio(){
+  const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+  audioContext = new (window.AudioContext||window.webkitAudioContext)();
+  if(audioContext.state==="suspended") await audioContext.resume();
+  analyser = audioContext.createAnalyser();
+  analyser.fftSize=256;
+  const src = audioContext.createMediaStreamSource(stream);
+  src.connect(analyser);
+  dataArray = new Uint8Array(analyser.frequencyBinCount);
+  document.getElementById('start-btn').style.display='none';
+  loop();
 }
 
-function updateMic() {
-    if (!analyser) return;
-    analyser.getByteFrequencyData(dataArray);
-    
-    // 計算平均音量
-    let sum = 0;
-    for(let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-    let avg = sum / dataArray.length;
-    
-    // 量化成 0 ~ 10 (你可以調整除數 25 來改變靈敏度)
-    micLevel = Math.min(10, Math.floor(avg / 10)); 
-    uiMic.innerText = micLevel;
+function updateMic(){
+  if(!analyser) return;
+
+  analyser.getByteFrequencyData(dataArray);
+  let sum=0;
+  for(let i=0;i<dataArray.length;i++) sum += dataArray[i];
+  const avg = sum / dataArray.length;
+
+  micLevel = Math.min(10, (avg/10)|0);
+  uiMic.textContent = micLevel;
+
+  // smooth loudness 0..1
+  const t = Math.min(1, avg/110); // sensitivity knob
+  loud = t>loud ? (loud*0.80 + t*0.20) : (loud*0.93 + t*0.07);
+
+  const desiredLen = Math.min(22, (loud*22)|0); // longer than before
+  if(desiredLen>0){
+    beamLen = desiredLen;
+    beamLife = BEAM_LIFE_MAX;
+  }else{
+    if(beamLife>0) beamLife--;
+    else beamLen=0;
+  }
 }
 
-// --- 4. 遊戲邏輯與控制 ---
-function move(dx, dy) {
-    let newX = player.x + dx;
-    let newY = player.y + dy;
-    
-    // 碰撞檢測：如果是地板(1)才能走
-    if (newX >= 0 && newX < mapWidth && newY >= 0 && newY < mapHeight && map[newY][newX] === 1) {
-        player.x = newX;
-        player.y = newY;
-    }
-    // 更新面朝方向 (用於照明)
-    if (dx !== 0 || dy !== 0) {
-        player.dirX = dx;
-        player.dirY = dy;
-    }
-    
-    // 勝利判定
-    if (player.x === goal.x && player.y === goal.y) {
-        alert("You Win! Refresh to restart.");
-        location.reload();
-    }
+/* Movement */
+function move(dx,dy){
+  const nx=player.x+dx, ny=player.y+dy;
+  if(map[ny]?.[nx]===1){ player.x=nx; player.y=ny; }
+  if(dx||dy){ player.dirX=dx; player.dirY=dy; }
 }
-
-// 鍵盤控制 (Desktop)
-window.addEventListener('keydown', (e) => {
-    if (e.key === 'w' || e.key === 'ArrowUp') move(0, -1);
-    if (e.key === 's' || e.key === 'ArrowDown') move(0, 1);
-    if (e.key === 'a' || e.key === 'ArrowLeft') move(-1, 0);
-    if (e.key === 'd' || e.key === 'ArrowRight') move(1, 0);
+addEventListener('keydown', e=>{
+  if(e.key==='w'||e.key==='ArrowUp') move(0,-1);
+  if(e.key==='s'||e.key==='ArrowDown') move(0, 1);
+  if(e.key==='a'||e.key==='ArrowLeft') move(-1,0);
+  if(e.key==='d'||e.key==='ArrowRight') move(1,0);
 });
+canvas.addEventListener('touchstart', e=>{
+  e.preventDefault();
+  const t=e.touches[0], cx=innerWidth/2, cy=innerHeight/2;
+  const dx=t.clientX-cx, dy=t.clientY-cy;
+  if(Math.abs(dx)>Math.abs(dy)) move(dx<0?-1:1,0);
+  else move(0,dy<0?-1:1);
+},{passive:false});
 
-// 觸控控制 (Mobile) - 點擊螢幕邊緣移動
-canvas.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    const touch = e.touches[0];
-    const cx = window.innerWidth / 2;
-    const cy = window.innerHeight / 2;
-    const tx = touch.clientX;
-    const ty = touch.clientY;
-    
-    // 簡單的四向判定
-    if (Math.abs(tx - cx) > Math.abs(ty - cy)) {
-        if (tx < cx) move(-1, 0); // Left
-        else move(1, 0);          // Right
-    } else {
-        if (ty < cy) move(0, -1); // Up
-        else move(0, 1);          // Down
+/* Draw */
+function draw(){
+  // full darkness
+  ctx.fillStyle="#000";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  const offX = canvas.width/2 - player.x*tile - tile/2;
+  const offY = canvas.height/2 - player.y*tile - tile/2;
+
+  // Smaller visible circle around player (in tiles)
+  const R = 3.0;     // <-- smaller than before (was ~4.2)
+  const pad = 14;    // draw window size
+
+  const minX=Math.max(0, player.x-pad), maxX=Math.min(mapW-1, player.x+pad);
+  const minY=Math.max(0, player.y-pad), maxY=Math.min(mapH-1, player.y+pad);
+
+  // Build beam list (can extend beyond R)
+  let beamList = null;
+  if(beamLife>0 && beamLen>0 && (player.dirX||player.dirY)){
+    beamList = [];
+    for(let i=1;i<=beamLen;i++){
+      const bx=player.x+player.dirX*i;
+      const by=player.y+player.dirY*i;
+      if(map[by]?.[bx]!==1) break; // stops at wall
+      beamList.push([bx,by]);
     }
-}, {passive: false});
+  }
 
-// --- 5. 渲染迴圈 ---
-function draw() {
-    // 調整 Canvas 大小
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    
-    // 計算鏡頭位置 (讓玩家保持在中心)
-    let screenTilesX = Math.ceil(canvas.width / tileSize);
-    let screenTilesY = Math.ceil(canvas.height / tileSize);
-    let offsetX = (canvas.width / 2) - (player.x * tileSize) - (tileSize / 2);
-    let offsetY = (canvas.height / 2) - (player.y * tileSize) - (tileSize / 2);
+  // Pass A: draw only the small circular region around player (unicolor tiles)
+  for(let y=minY;y<=maxY;y++){
+    for(let x=minX;x<=maxX;x++){
+      const dx=x-player.x, dy=y-player.y;
+      if(Math.sqrt(dx*dx+dy*dy) > R) continue;
 
-    // 清空背景
-    ctx.fillStyle = '#111';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // 繪製地圖 (只繪製視野內的以節省效能)
-    // 這裡我們為了 Demo 簡單，先繪製可見區域
-    let startCol = Math.floor(-offsetX / tileSize);
-    let endCol = startCol + screenTilesX + 1;
-    let startRow = Math.floor(-offsetY / tileSize);
-    let endRow = startRow + screenTilesY + 1;
-
-    for (let y = startRow; y < endRow; y++) {
-        for (let x = startCol; x < endCol; x++) {
-            if (y >= 0 && y < mapHeight && x >= 0 && x < mapWidth) {
-                let tileX = x * tileSize + offsetX;
-                let tileY = y * tileSize + offsetY;
-                
-                // 牆壁 (0)
-                if (map[y][x] === 0) {
-                    ctx.fillStyle = '#444'; // 灰色牆壁
-                    ctx.fillRect(tileX, tileY, tileSize, tileSize);
-                } else {
-                    // 地板 (1) - 畫格線
-                    ctx.strokeStyle = '#222';
-                    ctx.strokeRect(tileX, tileY, tileSize, tileSize);
-                }
-            }
-        }
+      const px=x*tile+offX, py=y*tile+offY;
+      ctx.fillStyle = map[y][x]===0 ? WALL : FLOOR;
+      ctx.fillRect(px,py,tile,tile);
     }
+  }
 
-    // --- 關鍵功能：聲波照明 (Raycasting) ---
-    // 根據音量(micLevel)決定照亮前方幾格
-    // 只有當玩家有移動方向時才照亮
-    if ((player.dirX !== 0 || player.dirY !== 0) && micLevel > 0) {
-        ctx.fillStyle = 'rgba(255, 255, 0, 0.4)'; // 半透明黃光
-        
-        for (let i = 1; i <= micLevel; i++) {
-            let checkX = player.x + (player.dirX * i);
-            let checkY = player.y + (player.dirY * i);
-            
-            // 如果超出地圖或撞牆，光線停止
-            if (checkX < 0 || checkX >= mapWidth || checkY < 0 || checkY >= mapHeight || map[checkY][checkX] === 0) {
-                // 照亮最後這面牆
-                let px = checkX * tileSize + offsetX;
-                let py = checkY * tileSize + offsetY;
-                ctx.fillStyle = 'rgba(255, 0, 0, 0.5)'; // 撞牆顯示紅色
-                ctx.fillRect(px, py, tileSize, tileSize);
-                break; 
-            }
-            
-            // 照亮路徑
-            let px = checkX * tileSize + offsetX;
-            let py = checkY * tileSize + offsetY;
-            ctx.fillRect(px, py, tileSize, tileSize);
-        }
+  // Pass B: draw beam tiles ANYWHERE (even outside the circle)
+  if(beamList){
+    for(const [x,y] of beamList){
+      // draw underlying tile so it’s visible even in darkness
+      const px=x*tile+offX, py=y*tile+offY;
+      ctx.fillStyle = map[y][x]===0 ? WALL : FLOOR;
+      ctx.fillRect(px,py,tile,tile);
+
+      // draw beam color on top
+      ctx.fillStyle = BEAM;
+      ctx.fillRect(px,py,tile,tile);
     }
+  }
 
-    // 繪製玩家
-    let pScreenX = player.x * tileSize + offsetX;
-    let pScreenY = player.y * tileSize + offsetY;
-    ctx.fillStyle = '#0f0'; // 綠色玩家
-    ctx.fillRect(pScreenX, pScreenY, tileSize, tileSize);
-    
-    // 繪製小箭頭指示方向
-    ctx.fillStyle = '#000';
-    ctx.beginPath();
-    ctx.arc(pScreenX + tileSize/2 + player.dirX*5, pScreenY + tileSize/2 + player.dirY*5, 2, 0, Math.PI*2);
-    ctx.fill();
+  // Player
+  const pX=player.x*tile+offX, pY=player.y*tile+offY;
+  ctx.fillStyle="#0f0";
+  ctx.fillRect(pX,pY,tile,tile);
 
-    // 繪製終點
-    let gScreenX = goal.x * tileSize + offsetX;
-    let gScreenY = goal.y * tileSize + offsetY;
-    ctx.fillStyle = 'gold';
-    ctx.font = '16px Arial';
-    ctx.fillText('🚩', gScreenX, gScreenY + 16);
+  // Facing dot
+  ctx.fillStyle="#000";
+  ctx.beginPath();
+  ctx.arc(pX+tile/2+player.dirX*6, pY+tile/2+player.dirY*6, 2.2, 0, Math.PI*2);
+  ctx.fill();
+
+  // Glow overlay (visual glow only)
+  const cx = pX + tile/2, cy = pY + tile/2;
+  const glowR = tile * (1.9 + 0.9*loud); // slightly smaller glow than before
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+  g.addColorStop(0.00, "rgba(255,255,255,0.33)");
+  g.addColorStop(0.45, "rgba(255,255,255,0.10)");
+  g.addColorStop(1.00, "rgba(255,255,255,0.00)");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(cx, cy, glowR, 0, Math.PI*2);
+  ctx.fill();
 }
 
-function gameLoop() {
-    updateMic();
-    draw();
-    requestAnimationFrame(gameLoop);
+function loop(){
+  updateMic();
+  draw();
+  requestAnimationFrame(loop);
 }
 
-// 啟動按鈕
-document.getElementById('start-btn').addEventListener('click', () => {
-    generateMap();
-    initAudio();
+document.getElementById('start-btn').addEventListener('click', ()=>{
+  genMap();
+  initAudio().catch(()=>alert("Microphone access denied! Must run on http://localhost"));
 });
-
 </script>
 </body>
 </html>
