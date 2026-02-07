@@ -115,7 +115,7 @@ const GHOST_RESPAWN_TIME = 300;
 
 // 戰鬥
 const BULLET_SPEED = 4;      
-const FIRE_THRESHOLD = 40;   
+const FIRE_THRESHOLD = 10;   
 const FIRE_COOLDOWN = 400;   
 
 // ==========================================
@@ -509,6 +509,17 @@ function updatePlayerMovement() {
             player.y = newY;
             player.moveTimer = PLAYER_MOVE_DELAY;
             
+            // 死胡同檢測（三面是牆）
+            let walls = 0;
+            if (map[player.y - 1]?.[player.x] === 0) walls++;
+            if (map[player.y + 1]?.[player.x] === 0) walls++;
+            if (map[player.y]?.[player.x - 1] === 0) walls++;
+            if (map[player.y]?.[player.x + 1] === 0) walls++;
+            if (walls >= 3) {
+                gobackAudio.currentTime = 0;
+                gobackAudio.play();
+            }
+
             // 勝利檢測
             if (player.x === goal.x && player.y === goal.y) {
                 gameOver('win');
@@ -683,8 +694,13 @@ function drawJoystick(stick, label) {
 // 遊戲狀態控制
 function gameOver(type) {
     gameActive = false;
-    if (type === 'win') winScreen.style.display = 'flex';
-    else loseScreen.style.display = 'flex';
+    if (type === 'win') {
+        winScreen.style.display = 'flex';
+    } else {
+        deathAudio.currentTime = 0;
+        deathAudio.play();
+        loseScreen.style.display = 'flex';
+    }
 }
 
 // 重新開始 (綁定到結局畫面點擊)
@@ -715,6 +731,19 @@ function gameLoop() {
     requestAnimationFrame(gameLoop);
 }
 
+// 死胡同音效
+const gobackAudio = new Audio('goback.mp3');
+
+// 死亡音效
+const deathAudio = new Audio('endgame.mp3');
+
+// 閃光彈音效
+const flashAudio = new Audio('flash.mp3');
+function playFlashSound() {
+    flashAudio.currentTime = 0;
+    flashAudio.play();
+}
+
 // --- 閃光彈 (Flash Grenade) ---
 const flashBtn = document.getElementById('flash-btn');
 const flashOverlay = document.getElementById('flash-overlay');
@@ -723,28 +752,34 @@ flashBtn.addEventListener('click', () => {
     if (flashUsed || !gameActive) return;
     flashUsed = true;
     flashBtn.disabled = true;
-    flashActive = true;
 
-    // 馬上全白閃光 + AppLovin
-    flashOverlay.style.display = 'flex';
-    flashOverlay.style.background = '#fff';
-    flashOverlay.style.opacity = '1';
-    flashOverlay.className = '';
+    // 先播音效，畫面不變（迷霧照舊）
+    playFlashSound();
 
+    // 1.5 秒後白色閃光
     setTimeout(() => {
-        flashOverlay.classList.add('show-ad');
-        // 1 秒後 fade out AppLovin，秀地圖
+        flashOverlay.style.display = 'flex';
+        flashOverlay.style.background = '#fff';
+        flashOverlay.style.opacity = '1';
+        flashOverlay.className = '';
+
+        // 0.5 秒後秀 AppLovin
         setTimeout(() => {
-            flashOverlay.classList.add('fade-out');
-            flashOverlay.addEventListener('transitionend', function handler() {
-                flashOverlay.removeEventListener('transitionend', handler);
-                flashOverlay.style.display = 'none';
-                flashOverlay.className = '';
-                // 霧關著，秀地圖 3 秒
-                setTimeout(() => { flashActive = false; }, 3000);
-            });
-        }, 1000);
-    }, 500);
+            flashOverlay.classList.add('show-ad');
+            // 1 秒後 fade out AppLovin，秀全圖
+            setTimeout(() => {
+                flashOverlay.classList.add('fade-out');
+                flashOverlay.addEventListener('transitionend', function handler() {
+                    flashOverlay.removeEventListener('transitionend', handler);
+                    flashOverlay.style.display = 'none';
+                    flashOverlay.className = '';
+                    // AppLovin 結束後才開全圖，顯示 2 秒
+                    flashActive = true;
+                    setTimeout(() => { flashActive = false; }, 2000);
+                });
+            }, 1000);
+        }, 500);
+    }, 1500);
 });
 
 // 啟動
