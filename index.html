@@ -14,13 +14,15 @@
     <button id="start-btn">Start Game (Allow Mic)</button>
     <canvas id="gameCanvas"></canvas>
 
+    <script src="ghost.js"></script>
+
 <script>
 // --- 1. 初始化設定 ---
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const uiMic = document.getElementById('mic-val');
-let mapWidth = 100;
-let mapHeight = 100;
+let mapWidth = 30;
+let mapHeight = 30;
 let tileSize = 20; // 每個格子的像素大小
 let map = []; // 0=Wall, 1=Floor
 let player = { x: 1, y: 1, dirX: 0, dirY: 0 }; // dir紀錄最後移動方向
@@ -58,6 +60,21 @@ function generateMap() {
             goal = {x: gx, y: gy};
             break;
         }
+    }
+
+    window.ghosts = [];
+    const numberOfGhosts = 2; // 你想要幾隻鬼就改這個數字
+
+    for (let i = 0; i < numberOfGhosts; i++) {
+        let gx, gy;
+        // 2. 用迴圈隨機找位置，直到找到不是牆壁(1)且離玩家有點距離的地方
+        do {
+            gx = Math.floor(Math.random() * mapWidth);
+            gy = Math.floor(Math.random() * mapHeight);
+        } while (map[gy][gx] !== 1 || (Math.abs(gx - player.x) < 5 && Math.abs(gy - player.y) < 5));
+
+        // 3. 把新生成的鬼丟進陣列裡
+        window.ghosts.push(new Ghost(gx, gy));
     }
 }
 
@@ -184,6 +201,12 @@ function draw() {
         }
     }
 
+    if (window.ghosts) {
+        window.ghosts.forEach(ghost => {
+            ghost.draw(ctx, offsetX, offsetY);
+        });
+    }
+
     // --- 關鍵功能：聲波照明 (Raycasting) ---
     // 根據音量(micLevel)決定照亮前方幾格
     // 只有當玩家有移動方向時才照亮
@@ -231,10 +254,45 @@ function draw() {
     ctx.fillText('🚩', gScreenX, gScreenY + 16);
 }
 
+// 放在 gameLoop 外面當作開關
+let isGameOver = false;
+
 function gameLoop() {
+    // 1. 安全檢查：如果遊戲已經結束，直接停止，不再計算任何東西
+    if (isGameOver) return;
+
     updateMic();
+
+    if (window.ghosts) {
+        // --- 修改重點：改用 for...of 迴圈 ---
+        for (const ghost of window.ghosts) {
+            
+            ghost.update(player, map, mapWidth, mapHeight);
+
+            if (ghost.checkCollision(player)) {
+                // 2. 鎖定狀態，防止重複觸發
+                isGameOver = true;
+
+                draw(); // 畫出死掉的畫面
+                
+                setTimeout(() => {
+                    alert(`got caught`);
+                    location.reload();
+                }, 10);
+                
+                // 3. 【關鍵】直接結束 gameLoop 函式
+                // 這樣程式就不會執行到最下面的 requestAnimationFrame
+                return; 
+            }
+        }
+    }
+
     draw();
-    requestAnimationFrame(gameLoop);
+    
+    // 4. 只有在遊戲還沒結束時，才請求下一幀
+    if (!isGameOver) {
+        requestAnimationFrame(gameLoop);
+    }
 }
 
 // 啟動按鈕
