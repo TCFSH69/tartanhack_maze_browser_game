@@ -268,6 +268,27 @@ function draw() {
     }
 
     ctx.drawImage(fogCanvas, 0, 0);
+
+    // 紅色箭頭指向終點
+    let angle = Math.atan2(goal.y - player.y, goal.x - player.x);
+    let arrowDist = tileSize * 4;
+    let ax = cx + Math.cos(angle) * arrowDist;
+    let ay = cy + Math.sin(angle) * arrowDist;
+    let arrowSize = 14;
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(arrowSize, 0);
+    ctx.lineTo(-arrowSize, -arrowSize * 0.6);
+    ctx.lineTo(-arrowSize * 0.4, 0);
+    ctx.lineTo(-arrowSize, arrowSize * 0.6);
+    ctx.closePath();
+    ctx.fillStyle = 'rgb(255,255,255)';
+    ctx.shadowColor = 'rgb(255,255,255)';
+    ctx.shadowBlur = 6;
+    ctx.fill();
+    ctx.restore();
 }
 
 function gameLoop() {
