@@ -516,8 +516,7 @@ function updatePlayerMovement() {
             if (map[player.y]?.[player.x - 1] === 0) walls++;
             if (map[player.y]?.[player.x + 1] === 0) walls++;
             if (walls >= 3) {
-                gobackAudio.currentTime = 0;
-                gobackAudio.play();
+                playGobackSound();
             }
 
             // 勝利檢測
@@ -697,8 +696,7 @@ function gameOver(type) {
     if (type === 'win') {
         winScreen.style.display = 'flex';
     } else {
-        deathAudio.currentTime = 0;
-        deathAudio.play();
+        playDeathSound();
         loseScreen.style.display = 'flex';
     }
 }
@@ -731,17 +729,96 @@ function gameLoop() {
     requestAnimationFrame(gameLoop);
 }
 
-// 死胡同音效
-const gobackAudio = new Audio('goback.mp3');
+// === 音效合成（全部用 Web Audio API） ===
 
-// 死亡音效
-const deathAudio = new Audio('endgame.mp3');
+// 1. 死胡同音效 — 短促低音警告
+function playGobackSound() {
+    let ctx = new AudioContext();
+    let t = ctx.currentTime;
+    // 兩聲短促低音 beep
+    for (let i = 0; i < 2; i++) {
+        let osc = ctx.createOscillator();
+        let gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(200, t + i * 0.15);
+        gain.gain.setValueAtTime(0.8, t + i * 0.15);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + i * 0.15 + 0.1);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t + i * 0.15);
+        osc.stop(t + i * 0.15 + 0.1);
+    }
+}
 
-// 閃光彈音效
-const flashAudio = new Audio('flash.mp3');
+// 2. 死亡音效 — 重擊 + 噪音
+function playDeathSound() {
+    let ctx = new AudioContext();
+    let t = ctx.currentTime;
+    // 低頻下降（重擊感）
+    let osc = ctx.createOscillator();
+    let gain = ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(500, t);
+    osc.frequency.exponentialRampToValueAtTime(40, t + 0.8);
+    gain.gain.setValueAtTime(1.0, t);
+    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.8);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(t + 0.8);
+    // 噪音衝擊
+    let buf = ctx.createBuffer(1, ctx.sampleRate * 0.5, ctx.sampleRate);
+    let data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1);
+    let noise = ctx.createBufferSource();
+    let nGain = ctx.createGain();
+    noise.buffer = buf;
+    nGain.gain.setValueAtTime(0.8, t);
+    nGain.gain.exponentialRampToValueAtTime(0.01, t + 0.5);
+    noise.connect(nGain);
+    nGain.connect(ctx.destination);
+    noise.start();
+}
+
+// 3. 閃光彈音效 — 高頻閃光 + 嗡鳴
 function playFlashSound() {
-    flashAudio.currentTime = 0;
-    flashAudio.play();
+    let ctx = new AudioContext();
+    let t = ctx.currentTime;
+    // 高頻爆閃
+    let osc1 = ctx.createOscillator();
+    let g1 = ctx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(2000, t);
+    osc1.frequency.exponentialRampToValueAtTime(500, t + 1.0);
+    g1.gain.setValueAtTime(1.0, t);
+    g1.gain.exponentialRampToValueAtTime(0.01, t + 1.0);
+    osc1.connect(g1);
+    g1.connect(ctx.destination);
+    osc1.start();
+    osc1.stop(t + 1.0);
+    // 低頻嗡鳴
+    let osc2 = ctx.createOscillator();
+    let g2 = ctx.createGain();
+    osc2.type = 'triangle';
+    osc2.frequency.setValueAtTime(150, t);
+    g2.gain.setValueAtTime(0.7, t);
+    g2.gain.exponentialRampToValueAtTime(0.01, t + 1.2);
+    osc2.connect(g2);
+    g2.connect(ctx.destination);
+    osc2.start();
+    osc2.stop(t + 1.2);
+    // 噪音爆破
+    let buf = ctx.createBuffer(1, ctx.sampleRate * 0.3, ctx.sampleRate);
+    let data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1);
+    let noise = ctx.createBufferSource();
+    let nGain = ctx.createGain();
+    noise.buffer = buf;
+    nGain.gain.setValueAtTime(0.9, t);
+    nGain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
+    noise.connect(nGain);
+    nGain.connect(ctx.destination);
+    noise.start();
 }
 
 // --- 閃光彈 (Flash Grenade) ---
