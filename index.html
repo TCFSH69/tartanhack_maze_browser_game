@@ -725,6 +725,7 @@ function fireBullet() {
     vx: player.aimDirX * BULLET_SPEED,
     vy: player.aimDirY * BULLET_SPEED
   });
+  playShootSound();
 }
 
 function updateBullets() {
@@ -1204,6 +1205,21 @@ function playFlashSound() {
   noise.connect(nGain);
   nGain.connect(ctxA.destination);
   noise.start();
+}
+
+// 4. 子彈發射音效 — 雷射下降
+function playShootSound() {
+  let ctxA = new AudioContext();
+  let t = ctxA.currentTime;
+  let osc = ctxA.createOscillator();
+  let gain = ctxA.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(1500, t);
+  osc.frequency.exponentialRampToValueAtTime(200, t + 0.15);
+  gain.gain.setValueAtTime(0.8, t);
+  gain.gain.exponentialRampToValueAtTime(0.01, t + 0.15);
+  osc.connect(gain); gain.connect(ctxA.destination);
+  osc.start(); osc.stop(t + 0.15);
 }
 
 /* ==========================
