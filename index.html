@@ -4,7 +4,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; touch-action: none; }
-        canvas { display: block; }
+        canvas { display: block; image-rendering: pixelated; }
         
         /* UI 介面 */
         #ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; text-shadow: 1px 1px 2px #000; font-weight: bold; }
@@ -127,6 +127,12 @@ const uiGhostCount = document.getElementById('ghost-count');
 const startBtn = document.getElementById('start-btn');
 const winScreen = document.getElementById('win');
 const loseScreen = document.getElementById('lose');
+
+const playerImg = new Image();
+playerImg.src = 'player.jpg';
+
+const ghostImg = new Image();
+ghostImg.src = 'ghost.jpg';
 
 let map = [];
 let player = { x: 1, y: 1, dirX: 0, dirY: 1, aimDirX: 0, aimDirY: 1, moveTimer: 0 };
@@ -359,13 +365,8 @@ class Ghost {
     draw(ctx, offX, offY) {
         if (this.isDead) return;
         let sx = this.x + offX, sy = this.y + offY;
-        ctx.fillStyle = this.color;
-        ctx.fillRect(sx, sy, this.size, this.size);
-        let ex = this.targetX > this.x ? 2 : this.targetX < this.x ? -2 : 0;
-        let ey = this.targetY > this.y ? 2 : this.targetY < this.y ? -2 : 0;
-        ctx.fillStyle = 'white';
-        ctx.fillRect(sx + 4 + ex, sy + 4 + ey, 5, 5);
-        ctx.fillRect(sx + 10 + ex, sy + 4 + ey, 5, 5);
+
+        ctx.drawImage(ghostImg, sx, sy, this.size, this.size);
     }
 }
 
@@ -528,24 +529,55 @@ function updatePlayerMovement() {
 }
 
 // --- 渲染 ---
+const PIXEL_SCALE = 3; // 越大越像素化（2=輕微, 3=中等, 4=重度）
 function draw() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    canvas.width = Math.floor(window.innerWidth / PIXEL_SCALE);
+    canvas.height = Math.floor(window.innerHeight / PIXEL_SCALE);
+    ctx.imageSmoothingEnabled = false;
 
-    let offX = (canvas.width / 2) - (player.x * TILE_SIZE) - (TILE_SIZE / 2);
-    let offY = (canvas.height / 2) - (player.y * TILE_SIZE) - (TILE_SIZE / 2);
+    // 閃光彈時縮放讓全圖塞進畫面
+    let flashZoom = 1;
+    if (flashActive) {
+        let mapW = MAP_WIDTH * TILE_SIZE;
+        let mapH = MAP_HEIGHT * TILE_SIZE;
+        flashZoom = Math.min(canvas.width / mapW, canvas.height / mapH) * 0.9;
+    }
+
+    let offX, offY;
+    if (flashActive) {
+        offX = (canvas.width / 2) - (MAP_WIDTH * TILE_SIZE * flashZoom / 2);
+        offY = (canvas.height / 2) - (MAP_HEIGHT * TILE_SIZE * flashZoom / 2);
+        ctx.save();
+        ctx.translate(offX, offY);
+        ctx.scale(flashZoom, flashZoom);
+        offX = 0;
+        offY = 0;
+    } else {
+        offX = (canvas.width / 2) - (player.x * TILE_SIZE) - (TILE_SIZE / 2);
+        offY = (canvas.height / 2) - (player.y * TILE_SIZE) - (TILE_SIZE / 2);
+    }
 
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // 地圖
-    let cols = Math.ceil(canvas.width / TILE_SIZE);
-    let rows = Math.ceil(canvas.height / TILE_SIZE);
-    let startCol = Math.floor(-offX / TILE_SIZE);
-    let startRow = Math.floor(-offY / TILE_SIZE);
+    let startCol, startRow, endCol, endRow;
+    if (flashActive) {
+        startCol = 0; startRow = 0;
+        endCol = MAP_WIDTH - 1; endRow = MAP_HEIGHT - 1;
+    } else {
+        let cols = Math.ceil(canvas.width / TILE_SIZE);
+        let rows = Math.ceil(canvas.height / TILE_SIZE);
+        startCol = Math.floor(-offX / TILE_SIZE);
+        startRow = Math.floor(-offY / TILE_SIZE);
+        endCol = startCol + cols;
+        endRow = startRow + rows;
+    }
 
-    for (let y = startRow; y <= startRow + rows; y++) {
-        for (let x = startCol; x <= startCol + cols; x++) {
+    for (let y = startRow; y <= endRow; y++) {
+        for (let x = startCol; x <= endCol; x++) {
             if (y >= 0 && y < MAP_HEIGHT && x >= 0 && x < MAP_WIDTH) {
                 let px = x * TILE_SIZE + offX;
                 let py = y * TILE_SIZE + offY;
@@ -566,14 +598,8 @@ function draw() {
     // 玩家
     let pX = player.x * TILE_SIZE + offX;
     let pY = player.y * TILE_SIZE + offY;
-    ctx.fillStyle = '#0f0';
-    ctx.fillRect(pX, pY, TILE_SIZE, TILE_SIZE);
-    
-    // 繪製移動方向
-    ctx.fillStyle = '#000';
-    ctx.beginPath();
-    ctx.arc(pX + TILE_SIZE/2 + player.dirX*6, pY + TILE_SIZE/2 + player.dirY*6, 2.2, 0, Math.PI*2);
-    ctx.fill();
+
+    ctx.drawImage(playerImg, pX, pY, TILE_SIZE, TILE_SIZE);
 
     // 瞄準準心
     let pcx = pX + TILE_SIZE / 2;
@@ -610,6 +636,9 @@ function draw() {
     ctx.fillText('\u{1F6A9}', gX, gY + 16);
 
     let cx = pX + TILE_SIZE / 2, cy = pY + TILE_SIZE / 2;
+
+    // 閃光彈縮放結束，恢復 ctx
+    if (flashActive) ctx.restore();
 
     // --- Fog of War (閃光彈啟動時跳過) ---
     if (!flashActive) {
@@ -673,21 +702,23 @@ function draw() {
 
 function drawJoystick(stick, label) {
     if (!stick.active) return;
+    let sx = stick.startX / PIXEL_SCALE, sy = stick.startY / PIXEL_SCALE;
+    let cx = stick.currX / PIXEL_SCALE, cy = stick.currY / PIXEL_SCALE;
     ctx.beginPath();
-    ctx.arc(stick.startX, stick.startY, 40, 0, Math.PI * 2);
+    ctx.arc(sx, sy, 40 / PIXEL_SCALE, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
     ctx.fill();
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
     ctx.lineWidth = 2;
     ctx.stroke();
     ctx.beginPath();
-    ctx.arc(stick.currX, stick.currY, 20, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 20 / PIXEL_SCALE, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
     ctx.fill();
     ctx.fillStyle = '#fff';
-    ctx.font = '12px sans-serif';
+    ctx.font = Math.floor(12 / PIXEL_SCALE) + 'px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(label, stick.startX, stick.startY + 60);
+    ctx.fillText(label, sx, sy + 60 / PIXEL_SCALE);
 }
 
 // 遊戲狀態控制

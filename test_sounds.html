@@ -89,6 +89,8 @@
     <button class="cool" onclick="playAntimatterSlam()">Antimatter Slam (反物質重擊)</button>
     <button class="cool" onclick="playNeuralSnap()">Neural Snap (神經脈衝)</button>
     <button class="cool" onclick="playQuantumGlitter()">Quantum Glitter (量子閃鑽)</button>
+    <button class="cool" onclick="playSong()">PLAY SONG (播放歌曲)</button>
+    <button class="goback" onclick="stopSong()">STOP SONG (停止)</button>
 
 
 <script>
@@ -125,6 +127,7 @@ function playFlash() {
     nGain.gain.exponentialRampToValueAtTime(0.01, t + 0.3);
     noise.connect(nGain); nGain.connect(ctx.destination);
     noise.start();
+    
 }
 
 // 2. 死亡 — 重擊下降 + 噪音
@@ -1914,6 +1917,221 @@ function playAntimatterSlam(){ SFX.playAntimatterSlam(); }
 function playNeuralSnap(){ SFX.playNeuralSnap(); }
 function playQuantumGlitter(){ SFX.playQuantumGlitter(); }
 
+/* ===== Tiny Procedural Song (loop) ===== */
+let MUS = { playing:false };
+
+function playSong(){
+  if (MUS.playing) return;
+  const AC = MUS.AC || (MUS.AC = new (window.AudioContext||window.webkitAudioContext)());
+  if (AC.state === "suspended") AC.resume();
+
+  MUS.playing = true;
+  MUS.bpm = 132;
+  MUS.step = 0;
+  MUS.bar = 0;
+  MUS.nextT = AC.currentTime + 0.05;
+  MUS.lookAhead = 0.12;
+
+  // master + glue
+  if (!MUS.master){
+    const master = AC.createGain(); master.gain.value = 0.85;
+    const comp = AC.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.knee.value = 25; comp.ratio.value = 10;
+    comp.attack.value = 0.003; comp.release.value = 0.22;
+
+    // cheap stereo delay “space”
+    const dL = AC.createDelay(1), dR = AC.createDelay(1);
+    dL.delayTime.value = 0.11; dR.delayTime.value = 0.145;
+    const fbL = AC.createGain(), fbR = AC.createGain();
+    fbL.gain.value = 0.35; fbR.gain.value = 0.33;
+
+    const panL = AC.createStereoPanner(); panL.pan.value = -0.35;
+    const panR = AC.createStereoPanner(); panR.pan.value =  0.35;
+
+    // feedback loops
+    dL.connect(fbL); fbL.connect(dL);
+    dR.connect(fbR); fbR.connect(dR);
+
+    // wet mix
+    const wet = AC.createGain(); wet.gain.value = 0.22;
+    dL.connect(panL); panL.connect(wet);
+    dR.connect(panR); panR.connect(wet);
+
+    master.connect(comp);
+    wet.connect(comp);
+    comp.connect(AC.destination);
+
+    MUS.master = master;
+    MUS.wetSend = { dL, dR };
+  }
+
+  // scheduler
+  MUS.timer = setInterval(() => _songTick(), 25);
+}
+
+function stopSong(){
+  MUS.playing = false;
+  if (MUS.timer) clearInterval(MUS.timer);
+  MUS.timer = null;
+}
+
+function _songTick(){
+  const AC = MUS.AC;
+  if (!MUS.playing || !AC) return;
+
+  const spb = 60 / MUS.bpm;          // seconds per beat
+  const stepDur = spb / 4;           // 16th note
+
+  while (MUS.nextT < AC.currentTime + MUS.lookAhead){
+    const s = MUS.step;
+
+    // ===== patterns (16 steps) =====
+    // melody is arranged by bars (variation every 4 bars)
+    const A = [72,null,74,null,79,null,77,null, 74,null,72,null,69,null,67,null]; // hook
+    const B = [72,null,74,76, 79,null,77,76, 74,null,72,null,69,67,69,null];     // busier
+    const C = [84,83,81,79, 77,76,74,72, 71,72,74,76, 77,79,81,83];              // rise
+
+    const bars = MUS.bar % 16;
+    let mel = A;
+    if (bars >= 4 && bars < 8) mel = B;
+    else if (bars >= 8 && bars < 12) mel = A;
+    else if (bars >= 12) mel = C;
+
+    // bass (4-on-the-floor-ish)
+    const bass = [36,null,36,null, 34,null,34,null, 31,null,31,null, 33,null,33,null];
+
+    // drums
+    const kick = [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0];
+    const sn   = [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0];
+    const hat  = [1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1];
+
+    // ===== schedule events =====
+    if (kick[s]) _kick(MUS.nextT);
+    if (sn[s])   _snare(MUS.nextT);
+    if (hat[s])  _hat(MUS.nextT);
+
+    // bass on 1/8 notes
+    if (s % 2 === 0) _bass(MUS.nextT, bass[s] ?? 36);
+
+    // melody on 1/8 notes (and some 1/16 in later bars)
+    if (mel[s] != null) _lead(MUS.nextT, mel[s], (bars>=12?0.10:0.12));
+
+    // step advance
+    MUS.nextT += stepDur;
+    MUS.step = (MUS.step + 1) & 15;
+    if (MUS.step === 0) MUS.bar++;
+  }
+}
+
+/* ===== Instruments ===== */
+function _mtof(m){ return 440 * Math.pow(2, (m-69)/12); }
+
+function _lead(t, midi, dur){
+  const AC = MUS.AC, f = _mtof(midi);
+  const o = AC.createOscillator();
+  const g = AC.createGain();
+  const lp = AC.createBiquadFilter();
+  const pan = AC.createStereoPanner();
+
+  o.type = "triangle";
+  o.frequency.setValueAtTime(f, t);
+  o.frequency.exponentialRampToValueAtTime(f*1.01, t+0.03); // tiny bite
+
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(9000, t);
+  lp.frequency.exponentialRampToValueAtTime(1800, t+dur);
+
+  pan.pan.setValueAtTime(Math.sin((MUS.bar%8)/8*Math.PI*2)*0.35, t);
+
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.28, t+0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+
+  o.connect(lp); lp.connect(pan); pan.connect(g); g.connect(MUS.master);
+
+  // send to stereo delay space
+  g.connect(MUS.wetSend.dL);
+  g.connect(MUS.wetSend.dR);
+
+  o.start(t); o.stop(t+dur+0.02);
+}
+
+function _bass(t, midi){
+  const AC = MUS.AC, f = _mtof(midi);
+  const o = AC.createOscillator();
+  const g = AC.createGain();
+  const lp = AC.createBiquadFilter();
+
+  o.type = "sawtooth";
+  o.frequency.setValueAtTime(f, t);
+  o.frequency.exponentialRampToValueAtTime(f*0.985, t+0.12);
+
+  lp.type = "lowpass";
+  lp.frequency.setValueAtTime(600, t);
+  lp.frequency.exponentialRampToValueAtTime(220, t+0.18);
+
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.35, t+0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.18);
+
+  o.connect(lp); lp.connect(g); g.connect(MUS.master);
+  o.start(t); o.stop(t+0.22);
+}
+
+function _kick(t){
+  const AC = MUS.AC;
+  const o = AC.createOscillator();
+  const g = AC.createGain();
+
+  o.type = "sine";
+  o.frequency.setValueAtTime(140, t);
+  o.frequency.exponentialRampToValueAtTime(38, t+0.10);
+
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.95, t+0.002);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.18);
+
+  o.connect(g); g.connect(MUS.master);
+  o.start(t); o.stop(t+0.20);
+}
+
+function _snare(t){
+  const AC = MUS.AC;
+  const sr = AC.sampleRate, len = (sr*0.14)|0;
+  const b = AC.createBuffer(1, len, sr);
+  const d = b.getChannelData(0);
+  for (let i=0;i<len;i++) d[i] = (Math.random()*2-1) * (1 - i/len);
+
+  const n = AC.createBufferSource(); n.buffer = b;
+  const bp = AC.createBiquadFilter(); bp.type="bandpass"; bp.frequency.value=1800; bp.Q.value=1.2;
+  const g = AC.createGain();
+
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.55, t+0.003);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.14);
+
+  n.connect(bp); bp.connect(g); g.connect(MUS.master);
+  n.start(t); n.stop(t+0.16);
+}
+
+function _hat(t){
+  const AC = MUS.AC;
+  const sr = AC.sampleRate, len = (sr*0.03)|0;
+  const b = AC.createBuffer(1, len, sr);
+  const d = b.getChannelData(0);
+  for (let i=0;i<len;i++) d[i] = (Math.random()*2-1);
+
+  const n = AC.createBufferSource(); n.buffer = b;
+  const hp = AC.createBiquadFilter(); hp.type="highpass"; hp.frequency.value=6000;
+  const g = AC.createGain();
+
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.18, t+0.001);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.03);
+
+  n.connect(hp); hp.connect(g); g.connect(MUS.master);
+  n.start(t); n.stop(t+0.04);
+}
 
 
 
