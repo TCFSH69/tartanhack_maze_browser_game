@@ -14,8 +14,6 @@
     <button id="start-btn">Start Game (Allow Mic)</button>
     <canvas id="gameCanvas"></canvas>
 
-    <script src="ghost.js"></script>
-
 <script>
 // --- 1. 初始化設定 ---
 const canvas = document.getElementById('gameCanvas');
@@ -23,58 +21,136 @@ const ctx = canvas.getContext('2d');
 const uiMic = document.getElementById('mic-val');
 let mapWidth = 30;
 let mapHeight = 30;
-let tileSize = 20; // 每個格子的像素大小
-let map = []; // 0=Wall, 1=Floor
-let player = { x: 1, y: 1, dirX: 0, dirY: 0 }; // dir紀錄最後移動方向
+let tileSize = 20;
+let map = [];
+let player = { x: 2, y: 2, dirX: 0, dirY: 1 };
 let goal = { x: 0, y: 0 };
-let micLevel = 0; // 量化後的音量 0-10
+let micLevel = 0;
 let audioContext, analyser, dataArray;
-let camera = { x: 0, y: 0 }; // 鏡頭位置
 
-// --- 2. 地圖生成 (用程式生成代替 Hardcode 以節省空間) ---
-// 如果真的要 Hardcode 100*100 array，會佔 20KB 文字量，會爆掉限制。
-// 這裡用簡單的演算法生成一個圍牆地圖
+// 光束系統
+let loud = 0;         // 平滑音量 0~1
+let beamLen = 0;      // 光束長度 (格數)
+let beamLife = 0;     // 光束殘留幀數
+const BEAM_LIFE_MAX = 180; // ~3 秒 (60fps * 3)
+const BEAM_COLOR = '#ffd400';
+const FLOOR_COLOR = '#2a2a2a';
+const WALL_COLOR = '#6a6a6a';
+let fogCanvas, fogCtx;
+let ghost = null;
+
+// --- Ghost (BFS 追蹤鬼) ---
+class Ghost {
+    constructor(startX, startY) {
+        this.x = startX * tileSize;
+        this.y = startY * tileSize;
+        this.size = 18;
+        this.color = 'red';
+        this.speed = 0.8;
+        this.targetX = this.x;
+        this.targetY = this.y;
+    }
+    update(player, map) {
+        let dist = Math.abs(this.x - this.targetX) + Math.abs(this.y - this.targetY);
+        if (dist < this.speed) {
+            this.x = this.targetX;
+            this.y = this.targetY;
+            let gx = Math.round(this.x / tileSize);
+            let gy = Math.round(this.y / tileSize);
+            let next = this.bfs(gx, gy, player.x, player.y, map);
+            if (next) {
+                this.targetX = next.x * tileSize;
+                this.targetY = next.y * tileSize;
+            }
+        }
+        if (this.x < this.targetX) this.x += this.speed;
+        if (this.x > this.targetX) this.x -= this.speed;
+        if (this.y < this.targetY) this.y += this.speed;
+        if (this.y > this.targetY) this.y -= this.speed;
+    }
+    bfs(sx, sy, ex, ey, map) {
+        if (sx === ex && sy === ey) return null;
+        let queue = [{x: sx, y: sy}];
+        let from = {};
+        let sk = `${sx},${sy}`;
+        from[sk] = null;
+        let found = false;
+        while (queue.length > 0) {
+            let c = queue.shift();
+            if (c.x === ex && c.y === ey) { found = true; break; }
+            for (let [dx, dy] of [[0,-1],[0,1],[-1,0],[1,0]]) {
+                let nx = c.x + dx, ny = c.y + dy, k = `${nx},${ny}`;
+                if (nx >= 0 && nx < mapWidth && ny >= 0 && ny < mapHeight &&
+                    map[ny][nx] === 1 && !from.hasOwnProperty(k)) {
+                    queue.push({x: nx, y: ny});
+                    from[k] = {x: c.x, y: c.y};
+                }
+            }
+        }
+        if (!found) return null;
+        let ck = `${ex},${ey}`, path = [];
+        while (ck !== sk) {
+            let p = ck.split(',').map(Number);
+            path.push({x: p[0], y: p[1]});
+            let pr = from[ck];
+            ck = `${pr.x},${pr.y}`;
+        }
+        return path[path.length - 1];
+    }
+    checkCollision(player) {
+        let px = player.x * tileSize, py = player.y * tileSize;
+        return this.x < px + tileSize && this.x + this.size > px &&
+               this.y < py + tileSize && this.y + this.size > py;
+    }
+    draw(ctx, offX, offY) {
+        let sx = this.x + offX, sy = this.y + offY;
+        ctx.fillStyle = this.color;
+        ctx.fillRect(sx, sy, this.size, this.size);
+        let ex = this.targetX > this.x ? 2 : this.targetX < this.x ? -2 : 0;
+        let ey = this.targetY > this.y ? 2 : this.targetY < this.y ? -2 : 0;
+        ctx.fillStyle = 'white';
+        ctx.fillRect(sx + 4 + ex, sy + 4 + ey, 5, 5);
+        ctx.fillRect(sx + 10 + ex, sy + 4 + ey, 5, 5);
+    }
+}
+
+// --- 2. 地圖生成 ---
 function generateMap() {
     map = [];
     for (let y = 0; y < mapHeight; y++) {
         let row = [];
         for (let x = 0; x < mapWidth; x++) {
-            // 邊緣是牆(0)，隨機生成障礙物
             if (x === 0 || x === mapWidth - 1 || y === 0 || y === mapHeight - 1 || Math.random() < 0.2) {
-                row.push(0); 
+                row.push(0);
             } else {
                 row.push(1);
             }
         }
         map.push(row);
     }
-    // 確保起點是空的
-    map[1][1] = 1;
-    player.x = 1; player.y = 1;
-    
-    // 生成終點 (簡單找一個不是牆的地方)
-    while(true) {
+    // 確保起點周圍是空的
+    for (let cy = 1; cy <= 3; cy++)
+        for (let cx = 1; cx <= 3; cx++) map[cy][cx] = 1;
+    player.x = 2; player.y = 2; player.dirX = 0; player.dirY = 1;
+
+    // 生成終點
+    while (true) {
         let gx = Math.floor(Math.random() * mapWidth);
         let gy = Math.floor(Math.random() * mapHeight);
-        if (map[gy][gx] === 1 && (gx > 10 || gy > 10)) { // 離起點遠一點
-            goal = {x: gx, y: gy};
+        if (map[gy][gx] === 1 && (gx > 10 || gy > 10)) {
+            goal = { x: gx, y: gy };
             break;
         }
     }
 
-    window.ghosts = [];
-    const numberOfGhosts = 2; // 你想要幾隻鬼就改這個數字
-
-    for (let i = 0; i < numberOfGhosts; i++) {
-        let gx, gy;
-        // 2. 用迴圈隨機找位置，直到找到不是牆壁(1)且離玩家有點距離的地方
-        do {
-            gx = Math.floor(Math.random() * mapWidth);
-            gy = Math.floor(Math.random() * mapHeight);
-        } while (map[gy][gx] !== 1 || (Math.abs(gx - player.x) < 5 && Math.abs(gy - player.y) < 5));
-
-        // 3. 把新生成的鬼丟進陣列裡
-        window.ghosts.push(new Ghost(gx, gy));
+    // 生成鬼 (離玩家遠一點)
+    while (true) {
+        let sx = Math.floor(Math.random() * mapWidth);
+        let sy = Math.floor(Math.random() * mapHeight);
+        if (map[sy][sx] === 1 && Math.abs(sx - player.x) + Math.abs(sy - player.y) > 20) {
+            ghost = new Ghost(sx, sy);
+            break;
+        }
     }
 }
 
@@ -83,6 +159,7 @@ async function initAudio() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state === 'suspended') await audioContext.resume();
         analyser = audioContext.createAnalyser();
         const source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
@@ -98,34 +175,61 @@ async function initAudio() {
 function updateMic() {
     if (!analyser) return;
     analyser.getByteFrequencyData(dataArray);
-    
-    // 計算平均音量
+
     let sum = 0;
-    for(let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
     let avg = sum / dataArray.length;
-    
-    // 量化成 0 ~ 10 (你可以調整除數 25 來改變靈敏度)
-    micLevel = Math.min(10, Math.floor(avg / 10)); 
+
+    micLevel = Math.min(10, Math.floor(avg / 10));
     uiMic.innerText = micLevel;
+
+    // 平滑音量 0~1
+    let t = Math.min(1, avg / 110);
+    loud = t > loud ? (loud * 0.80 + t * 0.20) : (loud * 0.93 + t * 0.07);
+
+    // 光束長度與殘留
+    let desiredLen = Math.min(22, (loud * 22) | 0);
+    if (desiredLen > 0) {
+        beamLen = desiredLen;
+        beamLife = BEAM_LIFE_MAX;
+    } else {
+        if (beamLife > 0) beamLife--;
+        else beamLen = 0;
+    }
+}
+
+// 撞牆音效
+function playWallHitSound() {
+    if (!audioContext) return;
+    let osc = audioContext.createOscillator();
+    let gain = audioContext.createGain();
+    osc.connect(gain);
+    gain.connect(audioContext.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(150, audioContext.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(50, audioContext.currentTime + 0.15);
+    gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15);
+    osc.start(audioContext.currentTime);
+    osc.stop(audioContext.currentTime + 0.15);
 }
 
 // --- 4. 遊戲邏輯與控制 ---
 function move(dx, dy) {
     let newX = player.x + dx;
     let newY = player.y + dy;
-    
-    // 碰撞檢測：如果是地板(1)才能走
+
     if (newX >= 0 && newX < mapWidth && newY >= 0 && newY < mapHeight && map[newY][newX] === 1) {
         player.x = newX;
         player.y = newY;
+    } else {
+        playWallHitSound();
     }
-    // 更新面朝方向 (用於照明)
     if (dx !== 0 || dy !== 0) {
         player.dirX = dx;
         player.dirY = dy;
     }
-    
-    // 勝利判定
+
     if (player.x === goal.x && player.y === goal.y) {
         alert("You Win! Refresh to restart.");
         location.reload();
@@ -134,165 +238,160 @@ function move(dx, dy) {
 
 // 鍵盤控制 (Desktop)
 window.addEventListener('keydown', (e) => {
+    if (['w','s','a','d','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
     if (e.key === 'w' || e.key === 'ArrowUp') move(0, -1);
     if (e.key === 's' || e.key === 'ArrowDown') move(0, 1);
     if (e.key === 'a' || e.key === 'ArrowLeft') move(-1, 0);
     if (e.key === 'd' || e.key === 'ArrowRight') move(1, 0);
 });
 
-// 觸控控制 (Mobile) - 點擊螢幕邊緣移動
+// 觸控控制 (Mobile)
 canvas.addEventListener('touchstart', (e) => {
     e.preventDefault();
     const touch = e.touches[0];
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
-    const tx = touch.clientX;
-    const ty = touch.clientY;
-    
-    // 簡單的四向判定
-    if (Math.abs(tx - cx) > Math.abs(ty - cy)) {
-        if (tx < cx) move(-1, 0); // Left
-        else move(1, 0);          // Right
-    } else {
-        if (ty < cy) move(0, -1); // Up
-        else move(0, 1);          // Down
-    }
-}, {passive: false});
+    const dx = touch.clientX - cx;
+    const dy = touch.clientY - cy;
+    if (Math.abs(dx) > Math.abs(dy)) move(dx < 0 ? -1 : 1, 0);
+    else move(0, dy < 0 ? -1 : 1);
+}, { passive: false });
 
 // --- 5. 渲染迴圈 ---
 function draw() {
-    // 調整 Canvas 大小
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
-    
-    // 計算鏡頭位置 (讓玩家保持在中心)
-    let screenTilesX = Math.ceil(canvas.width / tileSize);
-    let screenTilesY = Math.ceil(canvas.height / tileSize);
-    let offsetX = (canvas.width / 2) - (player.x * tileSize) - (tileSize / 2);
-    let offsetY = (canvas.height / 2) - (player.y * tileSize) - (tileSize / 2);
 
-    // 清空背景
-    ctx.fillStyle = '#111';
+    ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // 繪製地圖 (只繪製視野內的以節省效能)
-    // 這裡我們為了 Demo 簡單，先繪製可見區域
-    let startCol = Math.floor(-offsetX / tileSize);
-    let endCol = startCol + screenTilesX + 1;
-    let startRow = Math.floor(-offsetY / tileSize);
-    let endRow = startRow + screenTilesY + 1;
+    let offX = (canvas.width / 2) - (player.x * tileSize) - (tileSize / 2);
+    let offY = (canvas.height / 2) - (player.y * tileSize) - (tileSize / 2);
 
-    for (let y = startRow; y < endRow; y++) {
-        for (let x = startCol; x < endCol; x++) {
-            if (y >= 0 && y < mapHeight && x >= 0 && x < mapWidth) {
-                let tileX = x * tileSize + offsetX;
-                let tileY = y * tileSize + offsetY;
-                
-                // 牆壁 (0)
-                if (map[y][x] === 0) {
-                    ctx.fillStyle = '#444'; // 灰色牆壁
-                    ctx.fillRect(tileX, tileY, tileSize, tileSize);
-                } else {
-                    // 地板 (1) - 畫格線
-                    ctx.strokeStyle = '#222';
-                    ctx.strokeRect(tileX, tileY, tileSize, tileSize);
-                }
-            }
+    // 繪製附近地圖格子（會被霧蓋住，靠光暈/光束才看得到）
+    let pad = Math.max(beamLen + 2, 6);
+    let minX = Math.max(0, player.x - pad), maxX = Math.min(mapWidth - 1, player.x + pad);
+    let minY = Math.max(0, player.y - pad), maxY = Math.min(mapHeight - 1, player.y + pad);
+    for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+            let px = x * tileSize + offX, py = y * tileSize + offY;
+            ctx.fillStyle = map[y][x] === 0 ? WALL_COLOR : FLOOR_COLOR;
+            ctx.fillRect(px, py, tileSize, tileSize);
         }
     }
 
-    if (window.ghosts) {
-        window.ghosts.forEach(ghost => {
-            ghost.draw(ctx, offsetX, offsetY);
-        });
+    // 建立光束清單 (直線，碰牆停止)
+    let beamTiles = null;
+    if (beamLife > 0 && beamLen > 0 && (player.dirX || player.dirY)) {
+        beamTiles = [];
+        for (let i = 1; i <= beamLen; i++) {
+            let bx = player.x + player.dirX * i;
+            let by = player.y + player.dirY * i;
+            if (map[by]?.[bx] !== 1) break;
+            beamTiles.push([bx, by]);
+        }
     }
 
-    // --- 關鍵功能：聲波照明 (Raycasting) ---
-    // 根據音量(micLevel)決定照亮前方幾格
-    // 只有當玩家有移動方向時才照亮
-    if ((player.dirX !== 0 || player.dirY !== 0) && micLevel > 0) {
-        ctx.fillStyle = 'rgba(255, 255, 0, 0.4)'; // 半透明黃光
-        
-        for (let i = 1; i <= micLevel; i++) {
-            let checkX = player.x + (player.dirX * i);
-            let checkY = player.y + (player.dirY * i);
-            
-            // 如果超出地圖或撞牆，光線停止
-            if (checkX < 0 || checkX >= mapWidth || checkY < 0 || checkY >= mapHeight || map[checkY][checkX] === 0) {
-                // 照亮最後這面牆
-                let px = checkX * tileSize + offsetX;
-                let py = checkY * tileSize + offsetY;
-                ctx.fillStyle = 'rgba(255, 0, 0, 0.5)'; // 撞牆顯示紅色
-                ctx.fillRect(px, py, tileSize, tileSize);
-                break; 
-            }
-            
-            // 照亮路徑
-            let px = checkX * tileSize + offsetX;
-            let py = checkY * tileSize + offsetY;
+    // 光束格子上色
+    if (beamTiles) {
+        for (const [x, y] of beamTiles) {
+            let px = x * tileSize + offX, py = y * tileSize + offY;
+            ctx.fillStyle = BEAM_COLOR;
             ctx.fillRect(px, py, tileSize, tileSize);
         }
     }
 
     // 繪製玩家
-    let pScreenX = player.x * tileSize + offsetX;
-    let pScreenY = player.y * tileSize + offsetY;
-    ctx.fillStyle = '#0f0'; // 綠色玩家
-    ctx.fillRect(pScreenX, pScreenY, tileSize, tileSize);
-    
-    // 繪製小箭頭指示方向
+    let pX = player.x * tileSize + offX;
+    let pY = player.y * tileSize + offY;
+    ctx.fillStyle = '#0f0';
+    ctx.fillRect(pX, pY, tileSize, tileSize);
+
+    // 繪製方向指示
     ctx.fillStyle = '#000';
     ctx.beginPath();
-    ctx.arc(pScreenX + tileSize/2 + player.dirX*5, pScreenY + tileSize/2 + player.dirY*5, 2, 0, Math.PI*2);
+    ctx.arc(pX + tileSize / 2 + player.dirX * 6, pY + tileSize / 2 + player.dirY * 6, 2.2, 0, Math.PI * 2);
     ctx.fill();
 
+    // 繪製鬼
+    if (ghost) ghost.draw(ctx, offX, offY);
+
     // 繪製終點
-    let gScreenX = goal.x * tileSize + offsetX;
-    let gScreenY = goal.y * tileSize + offsetY;
+    let gX = goal.x * tileSize + offX;
+    let gY = goal.y * tileSize + offY;
     ctx.fillStyle = 'gold';
     ctx.font = '16px Arial';
-    ctx.fillText('🚩', gScreenX, gScreenY + 16);
-}
+    ctx.fillText('\u{1F6A9}', gX, gY + 16);
 
-// 放在 gameLoop 外面當作開關
-let isGameOver = false;
+    // --- Fog of War ---
+    if (!fogCanvas) {
+        fogCanvas = document.createElement('canvas');
+        fogCtx = fogCanvas.getContext('2d');
+    }
+    fogCanvas.width = canvas.width;
+    fogCanvas.height = canvas.height;
+    fogCtx.globalCompositeOperation = 'source-over';
+    fogCtx.fillStyle = '#000';
+    fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
 
-function gameLoop() {
-    // 1. 安全檢查：如果遊戲已經結束，直接停止，不再計算任何東西
-    if (isGameOver) return;
+    fogCtx.globalCompositeOperation = 'destination-out';
 
-    updateMic();
+    // 九宮格光暈（用漸層挖洞，讓底下地圖透出來）
+    let cx = pX + tileSize / 2, cy = pY + tileSize / 2;
+    let glowR = tileSize * 3;
+    let g = fogCtx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+    g.addColorStop(0.00, 'rgba(0,0,0,1)');
+    g.addColorStop(0.50, 'rgba(0,0,0,0.7)');
+    g.addColorStop(1.00, 'rgba(0,0,0,0)');
+    fogCtx.fillStyle = g;
+    fogCtx.beginPath();
+    fogCtx.arc(cx, cy, glowR, 0, Math.PI * 2);
+    fogCtx.fill();
 
-    if (window.ghosts) {
-        // --- 修改重點：改用 for...of 迴圈 ---
-        for (const ghost of window.ghosts) {
-            
-            ghost.update(player, map, mapWidth, mapHeight);
-
-            if (ghost.checkCollision(player)) {
-                // 2. 鎖定狀態，防止重複觸發
-                isGameOver = true;
-
-                draw(); // 畫出死掉的畫面
-                
-                setTimeout(() => {
-                    alert(`got caught`);
-                    location.reload();
-                }, 10);
-                
-                // 3. 【關鍵】直接結束 gameLoop 函式
-                // 這樣程式就不會執行到最下面的 requestAnimationFrame
-                return; 
-            }
+    // 光束挖洞（讓光束格子透出來）
+    if (beamTiles) {
+        fogCtx.fillStyle = 'rgba(0,0,0,1)';
+        for (const [x, y] of beamTiles) {
+            fogCtx.fillRect(x * tileSize + offX, y * tileSize + offY, tileSize, tileSize);
         }
     }
 
-    draw();
-    
-    // 4. 只有在遊戲還沒結束時，才請求下一幀
-    if (!isGameOver) {
-        requestAnimationFrame(gameLoop);
+    ctx.drawImage(fogCanvas, 0, 0);
+
+    // 紅色箭頭指向終點
+    let angle = Math.atan2(goal.y - player.y, goal.x - player.x);
+    let arrowDist = tileSize * 4;
+    let ax = cx + Math.cos(angle) * arrowDist;
+    let ay = cy + Math.sin(angle) * arrowDist;
+    let arrowSize = 14;
+    ctx.save();
+    ctx.translate(ax, ay);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(arrowSize, 0);
+    ctx.lineTo(-arrowSize, -arrowSize * 0.6);
+    ctx.lineTo(-arrowSize * 0.4, 0);
+    ctx.lineTo(-arrowSize, arrowSize * 0.6);
+    ctx.closePath();
+    ctx.fillStyle = 'rgb(255,255,255)';
+    ctx.shadowColor = 'rgb(255,255,255)';
+    ctx.shadowBlur = 6;
+    ctx.fill();
+    ctx.restore();
+}
+
+function gameLoop() {
+    updateMic();
+    if (ghost) {
+        ghost.update(player, map);
+        if (ghost.checkCollision(player)) {
+            alert("You were caught by the ghost! Game Over.");
+            location.reload();
+            return;
+        }
     }
+    draw();
+    requestAnimationFrame(gameLoop);
 }
 
 // 啟動按鈕
