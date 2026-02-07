@@ -3,10 +3,40 @@
 <head>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
-        body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; touch-action: none; }
+        body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; touch-action: none; }
         canvas { display: block; }
-        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; text-shadow: 1px 1px 2px #000; }
-        #start-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 20px; font-size: 20px; background: #0f0; color: #000; border: none; cursor: pointer; border-radius: 8px; }
+        
+        /* UI 介面 */
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; text-shadow: 1px 1px 2px #000; font-weight: bold; }
+        
+        #start-btn { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            padding: 20px 40px; font-size: 24px; font-weight: bold;
+            background: #0f0; color: #000; border: 3px solid #fff; cursor: pointer; border-radius: 12px; 
+            box-shadow: 0 0 15px #0f0;
+            z-index: 20;
+        }
+
+        #controls-hint { 
+            position: absolute; bottom: 10px; width: 100%; text-align: center; 
+            color: #888; font-size: 12px; pointer-events: none; 
+        }
+
+        /* 結局畫面樣式 (Win/Lose) */
+        .end-screen {
+            display: none; /* 預設隱藏 */
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 30;
+            align-items: center; justify-content: center; text-align: center;
+            flex-direction: column;
+        }
+
+        .end-screen h1 { font-size: 60px; margin: 0; letter-spacing: 5px; }
+        .end-screen p { font-size: 20px; margin: 5px 0; }
+        
+        #win h1 { color: #ffd700; text-shadow: 0 0 20px #ffd700; }
+        #lose h1 { color: #ff0000; text-shadow: 0 0 20px #ff0000; }
     </style>
 </head>
 <body>
@@ -14,55 +44,190 @@
         Mic Level: <span id="mic-val">0</span> <br>
         Ghosts: <span id="ghost-count">3</span>
     </div>
-    <button id="start-btn">Start Game (Allow Mic)</button>
+
+    <button id="start-btn">START ESCAPE</button>
+    <div id="controls-hint">WASD to Move | Mouse to Aim | Scream to Shoot</div>
+
     <canvas id="gameCanvas"></canvas>
+
+    <div id="win" class="end-screen">
+        <div>
+            <h1>ESCAPED</h1>
+            <p>You found the goal.</p>
+            <p style="opacity:.7;margin-top:15px; font-size: 14px;">(Click anywhere to restart)</p>
+        </div>
+    </div>
+
+    <div id="lose" class="end-screen">
+        <div>
+            <h1>YOU DIED</h1>
+            <p>You have been caught.</p>
+            <p style="opacity:.7;margin-top:15px; font-size: 14px;">(Click anywhere to restart)</p>
+        </div>
+    </div>
 
 <script>
 // ==========================================
-// ★ Global Constants (遊戲參數設定區) ★
+// ★ Global Constants ★
 // ==========================================
 
-// --- 地圖設定 ---
+// 地圖大小 (建議奇數，方便迷宮算法生成)
+const MAP_WIDTH = 31; 
+const MAP_HEIGHT = 31;
 const TILE_SIZE = 20;
-const MAP_WIDTH = 30;
-const MAP_HEIGHT = 30;
-const FLOOR_COLOR = '#2a2a2a';
-const WALL_COLOR = '#6a6a6a';
 
-// --- 玩家設定 ---
-// 延遲幀數：越小越快。4 代表每 4 幀 (約0.06秒) 移動一格
-const PLAYER_MOVE_DELAY = 20; 
+const FLOOR_COLOR = '#222';
+const WALL_COLOR = '#555';
 
-// --- 鬼 (Ghost) 設定 ---
-const GHOST_COUNT = 3;       // 鬼的數量
-const GHOST_SPEED = 0.25;    // 鬼的速度 (玩家是 5，這裡是 1.25，即玩家的 1/4)
-const GHOST_RESPAWN_TIME = 300; // 復活時間 (幀數)，300幀約等於 5 秒 (60fps)
+// 玩家與鬼
+const PLAYER_MOVE_DELAY = 10; 
+const GHOST_COUNT = 5;       
+const GHOST_SPEED = 0.25;    
+const GHOST_RESPAWN_TIME = 300; 
 
-// --- 戰鬥設定 ---
-const BULLET_SPEED = 4;      // 子彈速度
-const FIRE_THRESHOLD = 50;   // 麥克風音量閾值 (0-255)
-const FIRE_COOLDOWN = 400;   // 發射冷卻 (毫秒)
+// 戰鬥
+const BULLET_SPEED = 4;      
+const FIRE_THRESHOLD = 50;   
+const FIRE_COOLDOWN = 400;   
 
 // ==========================================
 
-// --- 全域變數 ---
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const uiMic = document.getElementById('mic-val');
 const uiGhostCount = document.getElementById('ghost-count');
+const startBtn = document.getElementById('start-btn');
+const winScreen = document.getElementById('win');
+const loseScreen = document.getElementById('lose');
 
 let map = [];
-let player = { x: 2, y: 2, dirX: 0, dirY: 1, moveTimer: 0 };
+let player = { x: 1, y: 1, dirX: 0, dirY: 1, aimDirX: 0, aimDirY: 1, moveTimer: 0 };
 let goal = { x: 0, y: 0 };
 let bullets = [];
 let lastFireTime = 0;
-let ghosts = []; // 改為陣列存放多隻鬼
+let ghosts = []; 
 let fogCanvas, fogCtx;
 
 let audioContext, analyser, dataArray;
 let micLevel = 0;
+let gameActive = false; // 遊戲狀態控制
 
 let activeKeys = []; 
+let leftTouchId = null;
+let leftStick = { startX: 0, startY: 0, currX: 0, currY: 0, active: false };
+let rightTouchId = null;
+let rightStick = { startX: 0, startY: 0, currX: 0, currY: 0, active: false };
+let mousePos = { x: 0, y: 0 };
+
+// --- 迷宮生成算法 (Recursive Backtracker) ---
+function generateMaze() {
+    // 1. 初始化全牆壁 (0)
+    map = [];
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+        let row = [];
+        for (let x = 0; x < MAP_WIDTH; x++) row.push(0);
+        map.push(row);
+    }
+
+    // 2. 遞迴生成
+    // 使用 Stack 模擬遞迴，避免堆疊溢出
+    let stack = [];
+    let startX = 1; 
+    let startY = 1;
+    map[startY][startX] = 1;
+    stack.push({x: startX, y: startY});
+
+    while(stack.length > 0) {
+        let current = stack[stack.length - 1];
+        let neighbors = [];
+
+        // 檢查上下左右兩格遠的鄰居 (保證牆壁厚度)
+        let directions = [
+            {dx: 0, dy: -2}, {dx: 0, dy: 2}, {dx: -2, dy: 0}, {dx: 2, dy: 0}
+        ];
+
+        for (let dir of directions) {
+            let nx = current.x + dir.dx;
+            let ny = current.y + dir.dy;
+            
+            if (nx > 0 && nx < MAP_WIDTH - 1 && ny > 0 && ny < MAP_HEIGHT - 1 && map[ny][nx] === 0) {
+                neighbors.push({x: nx, y: ny, dx: dir.dx, dy: dir.dy});
+            }
+        }
+
+        if (neighbors.length > 0) {
+            // 隨機選一個鄰居
+            let next = neighbors[Math.floor(Math.random() * neighbors.length)];
+            
+            // 打通牆壁 (中間那格)
+            map[current.y + next.dy / 2][current.x + next.dx / 2] = 1;
+            // 標記鄰居為路
+            map[next.y][next.x] = 1;
+            
+            stack.push({x: next.x, y: next.y});
+        } else {
+            stack.pop();
+        }
+    }
+
+    // 3. 後處理：隨機打通一些牆壁 (製造迴圈，避免死胡同太多)
+    // 遍歷地圖，有 5% 機率把牆壁變成路
+    for (let y = 1; y < MAP_HEIGHT - 1; y++) {
+        for (let x = 1; x < MAP_WIDTH - 1; x++) {
+            if (map[y][x] === 0 && Math.random() < 0.05) {
+                // 檢查打通後是否連接兩條路 (避免產生大空地)
+                let neighbors = 0;
+                if (map[y-1][x] === 1) neighbors++;
+                if (map[y+1][x] === 1) neighbors++;
+                if (map[y][x-1] === 1) neighbors++;
+                if (map[y][x+1] === 1) neighbors++;
+                if (neighbors >= 2) map[y][x] = 1;
+            }
+        }
+    }
+
+    // 設定玩家起點 (左上角)
+    player.x = 1; player.y = 1;
+    player.dirX = 0; player.dirY = 1;
+    player.aimDirX = 0; player.aimDirY = 1;
+
+    // 設定終點 (右下角最遠的可行走格子)
+    // 簡單搜尋離起點最遠的點
+    let maxDist = 0;
+    for (let y = 0; y < MAP_HEIGHT; y++) {
+        for (let x = 0; x < MAP_WIDTH; x++) {
+            if (map[y][x] === 1) {
+                let dist = Math.abs(x - player.x) + Math.abs(y - player.y);
+                if (dist > maxDist) {
+                    maxDist = dist;
+                    goal = {x: x, y: y};
+                }
+            }
+        }
+    }
+
+    // 生成鬼 (隨機在空地，且離玩家有距離)
+    ghosts = [];
+    for (let i = 0; i < GHOST_COUNT; i++) {
+        let placed = false;
+        while (!placed) {
+            let rx = Math.floor(Math.random() * MAP_WIDTH);
+            let ry = Math.floor(Math.random() * MAP_HEIGHT);
+            if (map[ry][rx] === 1 && (Math.abs(rx - player.x) + Math.abs(ry - player.y) > 10)) {
+                ghosts.push(new Ghost(rx, ry));
+                placed = true;
+            }
+        }
+    }
+    
+    // 重置介面
+    uiGhostCount.innerText = ghosts.length;
+    uiGhostCount.style.color = "white";
+    startBtn.style.display = 'none';
+    winScreen.style.display = 'none';
+    loseScreen.style.display = 'none';
+    gameActive = true;
+}
 
 // --- Ghost Class ---
 class Ghost {
@@ -75,26 +240,20 @@ class Ghost {
         this.targetX = this.x;
         this.targetY = this.y;
         this.isDead = false;
-        this.respawnTimer = 0; // 復活倒數計時器
+        this.respawnTimer = 0; 
     }
 
     update(player, map) {
-        // 1. 如果死了，處理復活邏輯
         if (this.isDead) {
             this.respawnTimer--;
-            if (this.respawnTimer <= 0) {
-                this.respawn();
-            }
+            if (this.respawnTimer <= 0) this.respawn();
             return;
         }
 
-        // 2. 移動邏輯：往目標點靠近
         let dist = Math.abs(this.x - this.targetX) + Math.abs(this.y - this.targetY);
         if (dist < this.speed) {
             this.x = this.targetX;
             this.y = this.targetY;
-            
-            // 到達格子中心後，計算下一步 (BFS)
             let gx = Math.round(this.x / TILE_SIZE);
             let gy = Math.round(this.y / TILE_SIZE);
             let next = this.bfs(gx, gy, player.x, player.y, map);
@@ -104,20 +263,17 @@ class Ghost {
             }
         }
 
-        // 移動像素
         if (this.x < this.targetX) this.x += this.speed;
         if (this.x > this.targetX) this.x -= this.speed;
         if (this.y < this.targetY) this.y += this.speed;
         if (this.y > this.targetY) this.y -= this.speed;
     }
 
-    // 復活函數：隨機找一個離玩家遠的地方重生
     respawn() {
         let maxAttempts = 100;
         while (maxAttempts > 0) {
             let rx = Math.floor(Math.random() * MAP_WIDTH);
             let ry = Math.floor(Math.random() * MAP_HEIGHT);
-            // 必須是地板，且離玩家有一段距離
             if (map[ry][rx] === 1 && Math.abs(rx - player.x) + Math.abs(ry - player.y) > 15) {
                 this.x = rx * TILE_SIZE;
                 this.y = ry * TILE_SIZE;
@@ -137,10 +293,8 @@ class Ghost {
         let sk = `${sx},${sy}`;
         from[sk] = null;
         let found = false;
-        
-        // 為了效能，BFS 限制搜索深度
         let iterations = 0;
-        while (queue.length > 0 && iterations < 800) {
+        while (queue.length > 0 && iterations < 500) { // 限制深度以防卡頓
             iterations++;
             let c = queue.shift();
             if (c.x === ex && c.y === ey) { found = true; break; }
@@ -156,7 +310,6 @@ class Ghost {
         if (!found) return null;
         let ck = `${ex},${ey}`, path = [];
         if (!from[ck]) return null; 
-        
         while (ck !== sk) {
             let p = ck.split(',').map(Number);
             path.push({x: p[0], y: p[1]});
@@ -178,7 +331,6 @@ class Ghost {
         let sx = this.x + offX, sy = this.y + offY;
         ctx.fillStyle = this.color;
         ctx.fillRect(sx, sy, this.size, this.size);
-        // 眼睛
         let ex = this.targetX > this.x ? 2 : this.targetX < this.x ? -2 : 0;
         let ey = this.targetY > this.y ? 2 : this.targetY < this.y ? -2 : 0;
         ctx.fillStyle = 'white';
@@ -187,63 +339,21 @@ class Ghost {
     }
 }
 
-// --- 地圖生成 ---
-function generateMap() {
-    map = [];
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-        let row = [];
-        for (let x = 0; x < MAP_WIDTH; x++) {
-            if (x === 0 || x === MAP_WIDTH - 1 || y === 0 || y === MAP_HEIGHT - 1 || Math.random() < 0.2) {
-                row.push(0);
-            } else {
-                row.push(1);
-            }
-        }
-        map.push(row);
-    }
-    // 起點區域
-    for (let cy = 1; cy <= 3; cy++) for (let cx = 1; cx <= 3; cx++) map[cy][cx] = 1;
-    player.x = 2; player.y = 2; player.dirX = 0; player.dirY = 1;
-
-    // 終點
-    while (true) {
-        let gx = Math.floor(Math.random() * MAP_WIDTH);
-        let gy = Math.floor(Math.random() * MAP_HEIGHT);
-        if (map[gy][gx] === 1 && (gx > 10 || gy > 10)) {
-            goal = { x: gx, y: gy };
-            break;
-        }
-    }
-    
-    // 生成多隻鬼
-    ghosts = [];
-    for (let i = 0; i < GHOST_COUNT; i++) {
-        while (true) {
-            let sx = Math.floor(Math.random() * MAP_WIDTH);
-            let sy = Math.floor(Math.random() * MAP_HEIGHT);
-            if (map[sy][sx] === 1 && Math.abs(sx - player.x) + Math.abs(sy - player.y) > 15) {
-                ghosts.push(new Ghost(sx, sy));
-                break;
-            }
-        }
-    }
-}
-
 // --- 音訊 ---
 async function initAudio() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioContext.state === 'suspended') await audioContext.resume();
         analyser = audioContext.createAnalyser();
         const source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
         analyser.fftSize = 256;
         dataArray = new Uint8Array(analyser.frequencyBinCount);
-        document.getElementById('start-btn').style.display = 'none';
+        
+        generateMaze(); // 允許麥克風後開始遊戲
         gameLoop();
     } catch (e) {
-        alert("Microphone denied!");
+        alert("Microphone denied! Please allow access.");
     }
 }
 
@@ -257,8 +367,7 @@ function updateMic() {
     micLevel = Math.min(10, Math.floor(avg / 10));
     uiMic.innerText = micLevel + ` (dB: ${Math.floor(avg)})`;
 
-    // 發射子彈
-    if (avg > FIRE_THRESHOLD && Date.now() - lastFireTime > FIRE_COOLDOWN) {
+    if (gameActive && avg > FIRE_THRESHOLD && Date.now() - lastFireTime > FIRE_COOLDOWN) {
         fireBullet();
         lastFireTime = Date.now();
     }
@@ -269,8 +378,8 @@ function fireBullet() {
     bullets.push({
         x: player.x * TILE_SIZE + TILE_SIZE / 2,
         y: player.y * TILE_SIZE + TILE_SIZE / 2,
-        vx: player.dirX * BULLET_SPEED,
-        vy: player.dirY * BULLET_SPEED
+        vx: player.aimDirX * BULLET_SPEED,
+        vy: player.aimDirY * BULLET_SPEED
     });
 }
 
@@ -283,29 +392,58 @@ function updateBullets() {
         let gx = Math.floor(b.x / TILE_SIZE);
         let gy = Math.floor(b.y / TILE_SIZE);
         
-        // 撞牆
         if (gx < 0 || gx >= MAP_WIDTH || gy < 0 || gy >= MAP_HEIGHT || map[gy][gx] === 0) {
             bullets.splice(i, 1);
             continue;
         }
         
-        // 撞鬼檢測 (迴圈檢查所有鬼)
         for (let g of ghosts) {
             if (!g.isDead) {
                 if (b.x > g.x && b.x < g.x + g.size &&
                     b.y > g.y && b.y < g.y + g.size) {
                     
                     g.isDead = true;
-                    g.respawnTimer = GHOST_RESPAWN_TIME; // 設定復活倒數
+                    g.respawnTimer = GHOST_RESPAWN_TIME; 
                     bullets.splice(i, 1);
-                    break; // 子彈消失，跳出鬼的迴圈
+                    break; 
                 }
             }
         }
     }
 }
 
-// --- 玩家移動 ---
+// --- 輸入處理 ---
+function updateAim() {
+    if (rightStick.active) {
+        let dx = rightStick.currX - rightStick.startX;
+        let dy = rightStick.currY - rightStick.startY;
+        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+            if (Math.abs(dx) > Math.abs(dy)) {
+                player.aimDirX = dx > 0 ? 1 : -1;
+                player.aimDirY = 0;
+            } else {
+                player.aimDirX = 0;
+                player.aimDirY = dy > 0 ? 1 : -1;
+            }
+        }
+    } else {
+        let cx = window.innerWidth / 2;
+        let cy = window.innerHeight / 2;
+        let dx = mousePos.x - cx;
+        let dy = mousePos.y - cy;
+        
+        if (dx !== 0 || dy !== 0) {
+            if (Math.abs(dx) > Math.abs(dy)) {
+                player.aimDirX = dx > 0 ? 1 : -1;
+                player.aimDirY = 0;
+            } else {
+                player.aimDirX = 0;
+                player.aimDirY = dy > 0 ? 1 : -1;
+            }
+        }
+    }
+}
+
 function updatePlayerMovement() {
     if (player.moveTimer > 0) {
         player.moveTimer--;
@@ -315,7 +453,14 @@ function updatePlayerMovement() {
     let dx = 0;
     let dy = 0;
 
-    if (activeKeys.length > 0) {
+    if (leftStick.active) {
+        let touchDx = leftStick.currX - leftStick.startX;
+        let touchDy = leftStick.currY - leftStick.startY;
+        if (Math.abs(touchDx) > 20 || Math.abs(touchDy) > 20) {
+            if (Math.abs(touchDx) > Math.abs(touchDy)) dx = touchDx > 0 ? 1 : -1;
+            else dy = touchDy > 0 ? 1 : -1;
+        }
+    } else if (activeKeys.length > 0) {
         const lastKey = activeKeys[activeKeys.length - 1];
         if (lastKey === 'w' || lastKey === 'ArrowUp') dy = -1;
         else if (lastKey === 's' || lastKey === 'ArrowDown') dy = 1;
@@ -334,9 +479,9 @@ function updatePlayerMovement() {
             player.y = newY;
             player.moveTimer = PLAYER_MOVE_DELAY;
             
+            // 勝利檢測
             if (player.x === goal.x && player.y === goal.y) {
-                alert("You Win! Refresh to restart.");
-                location.reload();
+                gameOver('win');
             }
         }
     }
@@ -383,18 +528,38 @@ function draw() {
     let pY = player.y * TILE_SIZE + offY;
     ctx.fillStyle = '#0f0';
     ctx.fillRect(pX, pY, TILE_SIZE, TILE_SIZE);
+    
+    // 繪製移動方向
     ctx.fillStyle = '#000';
     ctx.beginPath();
     ctx.arc(pX + TILE_SIZE/2 + player.dirX*6, pY + TILE_SIZE/2 + player.dirY*6, 2.2, 0, Math.PI*2);
     ctx.fill();
 
-    // 鬼 (畫出所有活著的鬼)
+    // 瞄準準心
+    let pcx = pX + TILE_SIZE / 2;
+    let pcy = pY + TILE_SIZE / 2;
+    let reticleDist = 40; 
+    let reticleX = pcx + player.aimDirX * reticleDist;
+    let reticleY = pcy + player.aimDirY * reticleDist;
+
+    ctx.save();
+    ctx.strokeStyle = '#ff0000';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur = 15; 
+    ctx.beginPath();
+    ctx.arc(reticleX, reticleY, 10, 0, Math.PI * 2);
+    ctx.moveTo(reticleX - 14, reticleY); ctx.lineTo(reticleX + 14, reticleY);
+    ctx.moveTo(reticleX, reticleY - 14); ctx.lineTo(reticleX, reticleY + 14);
+    ctx.stroke();
+    ctx.restore();
+
+    // 鬼
     let aliveCount = 0;
     for (let g of ghosts) {
         g.draw(ctx, offX, offY);
         if (!g.isDead) aliveCount++;
     }
-    // 更新介面顯示活著的鬼的數量
     uiGhostCount.innerText = aliveCount;
 
     // 終點
@@ -438,9 +603,12 @@ function draw() {
 
     ctx.drawImage(fogCanvas, 0, 0);
 
-    // 終點箭頭
+    drawJoystick(leftStick, "Move");
+    drawJoystick(rightStick, "Aim");
+
+    // 終點指示箭頭
     let angle = Math.atan2(goal.y - player.y, goal.x - player.x);
-    let arrowDist = TILE_SIZE * 4;
+    let arrowDist = TILE_SIZE * 4; 
     let ax = cx + Math.cos(angle) * arrowDist;
     let ay = cy + Math.sin(angle) * arrowDist;
     let arrowSize = 14;
@@ -455,23 +623,58 @@ function draw() {
     ctx.closePath();
     ctx.fillStyle = 'rgb(255,255,255)';
     ctx.shadowColor = 'rgb(255,255,255)';
-    ctx.shadowBlur = 6;
+    ctx.shadowBlur = 10;
     ctx.fill();
     ctx.restore();
 }
 
+function drawJoystick(stick, label) {
+    if (!stick.active) return;
+    ctx.beginPath();
+    ctx.arc(stick.startX, stick.startY, 40, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(stick.currX, stick.currY, 20, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, stick.startX, stick.startY + 60);
+}
+
+// 遊戲狀態控制
+function gameOver(type) {
+    gameActive = false;
+    if (type === 'win') winScreen.style.display = 'flex';
+    else loseScreen.style.display = 'flex';
+}
+
+// 重新開始 (綁定到結局畫面點擊)
+function restart() {
+    location.reload();
+}
+winScreen.addEventListener('click', restart);
+loseScreen.addEventListener('click', restart);
+
 function gameLoop() {
     updateMic();
-    updatePlayerMovement();
-    updateBullets();
     
-    // 更新所有鬼
-    for (let g of ghosts) {
-        g.update(player, map);
-        if (g.checkCollision(player)) {
-            alert("Caught by ghost! Game Over.");
-            location.reload();
-            return;
+    if (gameActive) {
+        updateAim(); 
+        updatePlayerMovement(); 
+        updateBullets();
+        
+        for (let g of ghosts) {
+            g.update(player, map);
+            if (g.checkCollision(player)) {
+                gameOver('lose');
+                return;
+            }
         }
     }
 
@@ -480,38 +683,62 @@ function gameLoop() {
 }
 
 // 啟動
-document.getElementById('start-btn').addEventListener('click', () => {
-    generateMap();
-    initAudio();
-});
+startBtn.addEventListener('click', initAudio);
 
-// 鍵盤
+// --- 輸入事件 ---
 window.addEventListener('keydown', (e) => {
-    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d'].includes(e.key)) {
+        e.preventDefault(); // 防止滾動
+    }
     if (!activeKeys.includes(e.key)) activeKeys.push(e.key);
 });
 window.addEventListener('keyup', (e) => {
     activeKeys = activeKeys.filter(key => key !== e.key);
 });
-
-// 觸控
+window.addEventListener('mousemove', (e) => {
+    mousePos.x = e.clientX;
+    mousePos.y = e.clientY;
+});
 canvas.addEventListener('touchstart', (e) => {
     e.preventDefault();
-    const touch = e.touches[0];
-    const cx = window.innerWidth / 2;
-    const cy = window.innerHeight / 2;
-    let key = '';
-    if (Math.abs(touch.clientX - cx) > Math.abs(touch.clientY - cy)) {
-        key = touch.clientX < cx ? 'ArrowLeft' : 'ArrowRight';
-    } else {
-        key = touch.clientY < cy ? 'ArrowUp' : 'ArrowDown';
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        if (t.clientX < window.innerWidth / 2) {
+            if (leftTouchId === null) {
+                leftTouchId = t.identifier;
+                leftStick.startX = t.clientX; leftStick.startY = t.clientY;
+                leftStick.currX = t.clientX; leftStick.currY = t.clientY;
+                leftStick.active = true;
+            }
+        } else {
+            if (rightTouchId === null) {
+                rightTouchId = t.identifier;
+                rightStick.startX = t.clientX; rightStick.startY = t.clientY;
+                rightStick.currX = t.clientX; rightStick.currY = t.clientY;
+                rightStick.active = true;
+            }
+        }
     }
-    if (!activeKeys.includes(key)) activeKeys = [key];
 }, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        if (t.identifier === leftTouchId) { leftStick.currX = t.clientX; leftStick.currY = t.clientY; } 
+        else if (t.identifier === rightTouchId) { rightStick.currX = t.clientX; rightStick.currY = t.clientY; }
+    }
+}, { passive: false });
+function endTouch(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        if (t.identifier === leftTouchId) { leftTouchId = null; leftStick.active = false; } 
+        else if (t.identifier === rightTouchId) { rightTouchId = null; rightStick.active = false; }
+    }
+}
+canvas.addEventListener('touchend', endTouch);
+canvas.addEventListener('touchcancel', endTouch);
 
-canvas.addEventListener('touchend', () => {
-    activeKeys = [];
-});
 </script>
 </body>
 </html>

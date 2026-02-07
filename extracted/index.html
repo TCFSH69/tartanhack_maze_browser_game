@@ -5,67 +5,228 @@
     <style>
         body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: sans-serif; touch-action: none; }
         canvas { display: block; }
-        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; }
-        #start-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 20px; font-size: 20px; background: #0f0; color: #000; border: none; cursor: pointer; }
+        #ui { position: absolute; top: 10px; left: 10px; z-index: 10; pointer-events: none; text-shadow: 1px 1px 2px #000; }
+        #start-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 20px; font-size: 20px; background: #0f0; color: #000; border: none; cursor: pointer; border-radius: 8px; }
+        /* 簡單的提示文字 */
+        #controls-hint { position: absolute; bottom: 10px; width: 100%; text-align: center; color: #aaa; font-size: 12px; pointer-events: none; }
     </style>
 </head>
 <body>
-    <div id="ui">Mic Level: <span id="mic-val">0</span> | Steps: <span id="steps">0</span></div>
+    <div id="ui">
+        Mic Level: <span id="mic-val">0</span> <br>
+        Ghosts: <span id="ghost-count">3</span>
+    </div>
     <button id="start-btn">Start Game (Allow Mic)</button>
+    <div id="controls-hint">Desktop: WASD Move + Mouse Aim | Mobile: Left Touch Move + Right Touch Aim</div>
     <canvas id="gameCanvas"></canvas>
 
 <script>
-// --- 1. 初始化設定 ---
+// ==========================================
+// ★ Global Constants (遊戲參數設定區) ★
+// ==========================================
+
+const TILE_SIZE = 20;
+const MAP_WIDTH = 30;
+const MAP_HEIGHT = 30;
+const FLOOR_COLOR = '#2a2a2a';
+const WALL_COLOR = '#6a6a6a';
+
+const PLAYER_MOVE_DELAY = 20; 
+const GHOST_COUNT = 3;       
+const GHOST_SPEED = 0.25;    
+const GHOST_RESPAWN_TIME = 300; 
+
+const BULLET_SPEED = 4;      
+const FIRE_THRESHOLD = 50;   
+const FIRE_COOLDOWN = 400;   
+
+// ==========================================
+
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 const uiMic = document.getElementById('mic-val');
-let mapWidth = 100;
-let mapHeight = 100;
-let tileSize = 20; // 每個格子的像素大小
-let map = []; // 0=Wall, 1=Floor
-let player = { x: 1, y: 1, dirX: 0, dirY: 0 }; // dir紀錄最後移動方向
-let goal = { x: 0, y: 0 };
-let micLevel = 0; // 量化後的音量 0-10
-let audioContext, analyser, dataArray;
-let camera = { x: 0, y: 0 }; // 鏡頭位置
+const uiGhostCount = document.getElementById('ghost-count');
 
-// --- 2. 地圖生成 (用程式生成代替 Hardcode 以節省空間) ---
-// 如果真的要 Hardcode 100*100 array，會佔 20KB 文字量，會爆掉限制。
-// 這裡用簡單的演算法生成一個圍牆地圖
+let map = [];
+// 新增 aimDirX, aimDirY 用於獨立瞄準
+let player = { x: 2, y: 2, dirX: 0, dirY: 1, aimDirX: 0, aimDirY: 1, moveTimer: 0 };
+let goal = { x: 0, y: 0 };
+let bullets = [];
+let lastFireTime = 0;
+let ghosts = []; 
+let fogCanvas, fogCtx;
+
+let audioContext, analyser, dataArray;
+let micLevel = 0;
+
+let activeKeys = []; 
+
+// --- 虛擬搖桿狀態 ---
+let leftTouchId = null;
+let leftStick = { startX: 0, startY: 0, currX: 0, currY: 0, active: false };
+let rightTouchId = null;
+let rightStick = { startX: 0, startY: 0, currX: 0, currY: 0, active: false };
+// 滑鼠位置
+let mousePos = { x: 0, y: 0 };
+
+// --- Ghost Class ---
+class Ghost {
+    constructor(startX, startY) {
+        this.x = startX * TILE_SIZE;
+        this.y = startY * TILE_SIZE;
+        this.size = 18;
+        this.color = 'red';
+        this.speed = GHOST_SPEED; 
+        this.targetX = this.x;
+        this.targetY = this.y;
+        this.isDead = false;
+        this.respawnTimer = 0; 
+    }
+
+    update(player, map) {
+        if (this.isDead) {
+            this.respawnTimer--;
+            if (this.respawnTimer <= 0) this.respawn();
+            return;
+        }
+
+        let dist = Math.abs(this.x - this.targetX) + Math.abs(this.y - this.targetY);
+        if (dist < this.speed) {
+            this.x = this.targetX;
+            this.y = this.targetY;
+            let gx = Math.round(this.x / TILE_SIZE);
+            let gy = Math.round(this.y / TILE_SIZE);
+            let next = this.bfs(gx, gy, player.x, player.y, map);
+            if (next) {
+                this.targetX = next.x * TILE_SIZE;
+                this.targetY = next.y * TILE_SIZE;
+            }
+        }
+
+        if (this.x < this.targetX) this.x += this.speed;
+        if (this.x > this.targetX) this.x -= this.speed;
+        if (this.y < this.targetY) this.y += this.speed;
+        if (this.y > this.targetY) this.y -= this.speed;
+    }
+
+    respawn() {
+        let maxAttempts = 100;
+        while (maxAttempts > 0) {
+            let rx = Math.floor(Math.random() * MAP_WIDTH);
+            let ry = Math.floor(Math.random() * MAP_HEIGHT);
+            if (map[ry][rx] === 1 && Math.abs(rx - player.x) + Math.abs(ry - player.y) > 15) {
+                this.x = rx * TILE_SIZE;
+                this.y = ry * TILE_SIZE;
+                this.targetX = this.x;
+                this.targetY = this.y;
+                this.isDead = false;
+                break;
+            }
+            maxAttempts--;
+        }
+    }
+
+    bfs(sx, sy, ex, ey, map) {
+        if (sx === ex && sy === ey) return null;
+        let queue = [{x: sx, y: sy}];
+        let from = {};
+        let sk = `${sx},${sy}`;
+        from[sk] = null;
+        let found = false;
+        let iterations = 0;
+        while (queue.length > 0 && iterations < 800) {
+            iterations++;
+            let c = queue.shift();
+            if (c.x === ex && c.y === ey) { found = true; break; }
+            for (let [dx, dy] of [[0,-1],[0,1],[-1,0],[1,0]]) {
+                let nx = c.x + dx, ny = c.y + dy, k = `${nx},${ny}`;
+                if (nx >= 0 && nx < MAP_WIDTH && ny >= 0 && ny < MAP_HEIGHT &&
+                    map[ny][nx] === 1 && !from.hasOwnProperty(k)) {
+                    queue.push({x: nx, y: ny});
+                    from[k] = {x: c.x, y: c.y};
+                }
+            }
+        }
+        if (!found) return null;
+        let ck = `${ex},${ey}`, path = [];
+        if (!from[ck]) return null; 
+        while (ck !== sk) {
+            let p = ck.split(',').map(Number);
+            path.push({x: p[0], y: p[1]});
+            let pr = from[ck];
+            ck = `${pr.x},${pr.y}`;
+        }
+        return path[path.length - 1];
+    }
+
+    checkCollision(player) {
+        if (this.isDead) return false;
+        let px = player.x * TILE_SIZE, py = player.y * TILE_SIZE;
+        return this.x < px + TILE_SIZE - 4 && this.x + this.size > px + 4 &&
+               this.y < py + TILE_SIZE - 4 && this.y + this.size > py + 4;
+    }
+
+    draw(ctx, offX, offY) {
+        if (this.isDead) return;
+        let sx = this.x + offX, sy = this.y + offY;
+        ctx.fillStyle = this.color;
+        ctx.fillRect(sx, sy, this.size, this.size);
+        let ex = this.targetX > this.x ? 2 : this.targetX < this.x ? -2 : 0;
+        let ey = this.targetY > this.y ? 2 : this.targetY < this.y ? -2 : 0;
+        ctx.fillStyle = 'white';
+        ctx.fillRect(sx + 4 + ex, sy + 4 + ey, 5, 5);
+        ctx.fillRect(sx + 10 + ex, sy + 4 + ey, 5, 5);
+    }
+}
+
+// --- 地圖生成 ---
 function generateMap() {
     map = [];
-    for (let y = 0; y < mapHeight; y++) {
+    for (let y = 0; y < MAP_HEIGHT; y++) {
         let row = [];
-        for (let x = 0; x < mapWidth; x++) {
-            // 邊緣是牆(0)，隨機生成障礙物
-            if (x === 0 || x === mapWidth - 1 || y === 0 || y === mapHeight - 1 || Math.random() < 0.2) {
-                row.push(0); 
+        for (let x = 0; x < MAP_WIDTH; x++) {
+            if (x === 0 || x === MAP_WIDTH - 1 || y === 0 || y === MAP_HEIGHT - 1 || Math.random() < 0.2) {
+                row.push(0);
             } else {
                 row.push(1);
             }
         }
         map.push(row);
     }
-    // 確保起點是空的
-    map[1][1] = 1;
-    player.x = 1; player.y = 1;
-    
-    // 生成終點 (簡單找一個不是牆的地方)
-    while(true) {
-        let gx = Math.floor(Math.random() * mapWidth);
-        let gy = Math.floor(Math.random() * mapHeight);
-        if (map[gy][gx] === 1 && (gx > 10 || gy > 10)) { // 離起點遠一點
-            goal = {x: gx, y: gy};
+    for (let cy = 1; cy <= 3; cy++) for (let cx = 1; cx <= 3; cx++) map[cy][cx] = 1;
+    player.x = 2; player.y = 2; 
+    // 初始化瞄準為向下
+    player.dirX = 0; player.dirY = 1; 
+    player.aimDirX = 0; player.aimDirY = 1;
+
+    while (true) {
+        let gx = Math.floor(Math.random() * MAP_WIDTH);
+        let gy = Math.floor(Math.random() * MAP_HEIGHT);
+        if (map[gy][gx] === 1 && (gx > 10 || gy > 10)) {
+            goal = { x: gx, y: gy };
             break;
+        }
+    }
+    
+    ghosts = [];
+    for (let i = 0; i < GHOST_COUNT; i++) {
+        while (true) {
+            let sx = Math.floor(Math.random() * MAP_WIDTH);
+            let sy = Math.floor(Math.random() * MAP_HEIGHT);
+            if (map[sy][sx] === 1 && Math.abs(sx - player.x) + Math.abs(sy - player.y) > 15) {
+                ghosts.push(new Ghost(sx, sy));
+                break;
+            }
         }
     }
 }
 
-// --- 3. 麥克風與音訊處理 ---
+// --- 音訊 ---
 async function initAudio() {
     try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state === 'suspended') await audioContext.resume();
         analyser = audioContext.createAnalyser();
         const source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
@@ -74,174 +235,396 @@ async function initAudio() {
         document.getElementById('start-btn').style.display = 'none';
         gameLoop();
     } catch (e) {
-        alert("Microphone access denied! Game needs mic.");
+        alert("Microphone denied!");
     }
 }
 
 function updateMic() {
     if (!analyser) return;
     analyser.getByteFrequencyData(dataArray);
-    
-    // 計算平均音量
     let sum = 0;
-    for(let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
     let avg = sum / dataArray.length;
-    
-    // 量化成 0 ~ 10 (你可以調整除數 25 來改變靈敏度)
-    micLevel = Math.min(10, Math.floor(avg / 10)); 
-    uiMic.innerText = micLevel;
-}
 
-// --- 4. 遊戲邏輯與控制 ---
-function move(dx, dy) {
-    let newX = player.x + dx;
-    let newY = player.y + dy;
-    
-    // 碰撞檢測：如果是地板(1)才能走
-    if (newX >= 0 && newX < mapWidth && newY >= 0 && newY < mapHeight && map[newY][newX] === 1) {
-        player.x = newX;
-        player.y = newY;
-    }
-    // 更新面朝方向 (用於照明)
-    if (dx !== 0 || dy !== 0) {
-        player.dirX = dx;
-        player.dirY = dy;
-    }
-    
-    // 勝利判定
-    if (player.x === goal.x && player.y === goal.y) {
-        alert("You Win! Refresh to restart.");
-        location.reload();
+    micLevel = Math.min(10, Math.floor(avg / 10));
+    uiMic.innerText = micLevel + ` (dB: ${Math.floor(avg)})`;
+
+    if (avg > FIRE_THRESHOLD && Date.now() - lastFireTime > FIRE_COOLDOWN) {
+        fireBullet();
+        lastFireTime = Date.now();
     }
 }
 
-// 鍵盤控制 (Desktop)
-window.addEventListener('keydown', (e) => {
-    if (e.key === 'w' || e.key === 'ArrowUp') move(0, -1);
-    if (e.key === 's' || e.key === 'ArrowDown') move(0, 1);
-    if (e.key === 'a' || e.key === 'ArrowLeft') move(-1, 0);
-    if (e.key === 'd' || e.key === 'ArrowRight') move(1, 0);
-});
+// --- 戰鬥系統 ---
+function fireBullet() {
+    // 使用 aimDirX/Y (瞄準方向) 而不是移動方向
+    bullets.push({
+        x: player.x * TILE_SIZE + TILE_SIZE / 2,
+        y: player.y * TILE_SIZE + TILE_SIZE / 2,
+        vx: player.aimDirX * BULLET_SPEED,
+        vy: player.aimDirY * BULLET_SPEED
+    });
+}
 
-// 觸控控制 (Mobile) - 點擊螢幕邊緣移動
-canvas.addEventListener('touchstart', (e) => {
-    e.preventDefault();
-    const touch = e.touches[0];
-    const cx = window.innerWidth / 2;
-    const cy = window.innerHeight / 2;
-    const tx = touch.clientX;
-    const ty = touch.clientY;
-    
-    // 簡單的四向判定
-    if (Math.abs(tx - cx) > Math.abs(ty - cy)) {
-        if (tx < cx) move(-1, 0); // Left
-        else move(1, 0);          // Right
-    } else {
-        if (ty < cy) move(0, -1); // Up
-        else move(0, 1);          // Down
-    }
-}, {passive: false});
+function updateBullets() {
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        let b = bullets[i];
+        b.x += b.vx;
+        b.y += b.vy;
 
-// --- 5. 渲染迴圈 ---
-function draw() {
-    // 調整 Canvas 大小
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    
-    // 計算鏡頭位置 (讓玩家保持在中心)
-    let screenTilesX = Math.ceil(canvas.width / tileSize);
-    let screenTilesY = Math.ceil(canvas.height / tileSize);
-    let offsetX = (canvas.width / 2) - (player.x * tileSize) - (tileSize / 2);
-    let offsetY = (canvas.height / 2) - (player.y * tileSize) - (tileSize / 2);
-
-    // 清空背景
-    ctx.fillStyle = '#111';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // 繪製地圖 (只繪製視野內的以節省效能)
-    // 這裡我們為了 Demo 簡單，先繪製可見區域
-    let startCol = Math.floor(-offsetX / tileSize);
-    let endCol = startCol + screenTilesX + 1;
-    let startRow = Math.floor(-offsetY / tileSize);
-    let endRow = startRow + screenTilesY + 1;
-
-    for (let y = startRow; y < endRow; y++) {
-        for (let x = startCol; x < endCol; x++) {
-            if (y >= 0 && y < mapHeight && x >= 0 && x < mapWidth) {
-                let tileX = x * tileSize + offsetX;
-                let tileY = y * tileSize + offsetY;
-                
-                // 牆壁 (0)
-                if (map[y][x] === 0) {
-                    ctx.fillStyle = '#444'; // 灰色牆壁
-                    ctx.fillRect(tileX, tileY, tileSize, tileSize);
-                } else {
-                    // 地板 (1) - 畫格線
-                    ctx.strokeStyle = '#222';
-                    ctx.strokeRect(tileX, tileY, tileSize, tileSize);
+        let gx = Math.floor(b.x / TILE_SIZE);
+        let gy = Math.floor(b.y / TILE_SIZE);
+        
+        if (gx < 0 || gx >= MAP_WIDTH || gy < 0 || gy >= MAP_HEIGHT || map[gy][gx] === 0) {
+            bullets.splice(i, 1);
+            continue;
+        }
+        
+        for (let g of ghosts) {
+            if (!g.isDead) {
+                if (b.x > g.x && b.x < g.x + g.size &&
+                    b.y > g.y && b.y < g.y + g.size) {
+                    
+                    g.isDead = true;
+                    g.respawnTimer = GHOST_RESPAWN_TIME; 
+                    bullets.splice(i, 1);
+                    break; 
                 }
             }
         }
     }
+}
 
-    // --- 關鍵功能：聲波照明 (Raycasting) ---
-    // 根據音量(micLevel)決定照亮前方幾格
-    // 只有當玩家有移動方向時才照亮
-    if ((player.dirX !== 0 || player.dirY !== 0) && micLevel > 0) {
-        ctx.fillStyle = 'rgba(255, 255, 0, 0.4)'; // 半透明黃光
+// --- 輸入處理 (核心修改) ---
+
+function updateAim() {
+    // 1. 如果有右側搖桿輸入 (手機優先)
+    if (rightStick.active) {
+        let dx = rightStick.currX - rightStick.startX;
+        let dy = rightStick.currY - rightStick.startY;
         
-        for (let i = 1; i <= micLevel; i++) {
-            let checkX = player.x + (player.dirX * i);
-            let checkY = player.y + (player.dirY * i);
-            
-            // 如果超出地圖或撞牆，光線停止
-            if (checkX < 0 || checkX >= mapWidth || checkY < 0 || checkY >= mapHeight || map[checkY][checkX] === 0) {
-                // 照亮最後這面牆
-                let px = checkX * tileSize + offsetX;
-                let py = checkY * tileSize + offsetY;
-                ctx.fillStyle = 'rgba(255, 0, 0, 0.5)'; // 撞牆顯示紅色
-                ctx.fillRect(px, py, tileSize, tileSize);
-                break; 
+        // 簡單的死區判斷，避免抖動
+        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+            if (Math.abs(dx) > Math.abs(dy)) {
+                player.aimDirX = dx > 0 ? 1 : -1;
+                player.aimDirY = 0;
+            } else {
+                player.aimDirX = 0;
+                player.aimDirY = dy > 0 ? 1 : -1;
             }
+        }
+    } 
+    // 2. 否則使用滑鼠輸入 (電腦)
+    else {
+        let cx = window.innerWidth / 2;
+        let cy = window.innerHeight / 2;
+        let dx = mousePos.x - cx;
+        let dy = mousePos.y - cy;
+        
+        if (Math.abs(dx) > Math.abs(dy)) {
+            player.aimDirX = dx > 0 ? 1 : -1;
+            player.aimDirY = 0;
+        } else {
+            player.aimDirX = 0;
+            player.aimDirY = dy > 0 ? 1 : -1;
+        }
+    }
+}
+
+function updatePlayerMovement() {
+    if (player.moveTimer > 0) {
+        player.moveTimer--;
+        return;
+    }
+
+    let dx = 0;
+    let dy = 0;
+
+    // 1. 優先檢查左側搖桿 (手機)
+    if (leftStick.active) {
+        let touchDx = leftStick.currX - leftStick.startX;
+        let touchDy = leftStick.currY - leftStick.startY;
+        
+        if (Math.abs(touchDx) > 20 || Math.abs(touchDy) > 20) {
+            if (Math.abs(touchDx) > Math.abs(touchDy)) {
+                dx = touchDx > 0 ? 1 : -1;
+            } else {
+                dy = touchDy > 0 ? 1 : -1;
+            }
+        }
+    }
+    // 2. 如果沒有搖桿輸入，檢查鍵盤 (電腦)
+    else if (activeKeys.length > 0) {
+        const lastKey = activeKeys[activeKeys.length - 1];
+        if (lastKey === 'w' || lastKey === 'ArrowUp') dy = -1;
+        else if (lastKey === 's' || lastKey === 'ArrowDown') dy = 1;
+        else if (lastKey === 'a' || lastKey === 'ArrowLeft') dx = -1;
+        else if (lastKey === 'd' || lastKey === 'ArrowRight') dx = 1;
+    }
+
+    if (dx !== 0 || dy !== 0) {
+        player.dirX = dx;
+        player.dirY = dy;
+        let newX = player.x + dx;
+        let newY = player.y + dy;
+
+        if (newX >= 0 && newX < MAP_WIDTH && newY >= 0 && newY < MAP_HEIGHT && map[newY][newX] === 1) {
+            player.x = newX;
+            player.y = newY;
+            player.moveTimer = PLAYER_MOVE_DELAY;
             
-            // 照亮路徑
-            let px = checkX * tileSize + offsetX;
-            let py = checkY * tileSize + offsetY;
-            ctx.fillRect(px, py, tileSize, tileSize);
+            if (player.x === goal.x && player.y === goal.y) {
+                alert("You Win! Refresh to restart.");
+                location.reload();
+            }
+        }
+    }
+}
+
+// --- 渲染 ---
+function draw() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    let offX = (canvas.width / 2) - (player.x * TILE_SIZE) - (TILE_SIZE / 2);
+    let offY = (canvas.height / 2) - (player.y * TILE_SIZE) - (TILE_SIZE / 2);
+
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 地圖
+    let cols = Math.ceil(canvas.width / TILE_SIZE);
+    let rows = Math.ceil(canvas.height / TILE_SIZE);
+    let startCol = Math.floor(-offX / TILE_SIZE);
+    let startRow = Math.floor(-offY / TILE_SIZE);
+
+    for (let y = startRow; y <= startRow + rows; y++) {
+        for (let x = startCol; x <= startCol + cols; x++) {
+            if (y >= 0 && y < MAP_HEIGHT && x >= 0 && x < MAP_WIDTH) {
+                let px = x * TILE_SIZE + offX;
+                let py = y * TILE_SIZE + offY;
+                ctx.fillStyle = map[y][x] === 0 ? WALL_COLOR : FLOOR_COLOR;
+                ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+            }
         }
     }
 
-    // 繪製玩家
-    let pScreenX = player.x * tileSize + offsetX;
-    let pScreenY = player.y * tileSize + offsetY;
-    ctx.fillStyle = '#0f0'; // 綠色玩家
-    ctx.fillRect(pScreenX, pScreenY, tileSize, tileSize);
+    // 子彈
+    ctx.fillStyle = '#ffff00';
+    for (let b of bullets) {
+        ctx.beginPath();
+        ctx.arc(b.x + offX, b.y + offY, 4, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // 玩家
+    let pX = player.x * TILE_SIZE + offX;
+    let pY = player.y * TILE_SIZE + offY;
+    ctx.fillStyle = '#0f0';
+    ctx.fillRect(pX, pY, TILE_SIZE, TILE_SIZE);
     
-    // 繪製小箭頭指示方向
+    // 繪製移動方向 (黑色小點)
     ctx.fillStyle = '#000';
     ctx.beginPath();
-    ctx.arc(pScreenX + tileSize/2 + player.dirX*5, pScreenY + tileSize/2 + player.dirY*5, 2, 0, Math.PI*2);
+    ctx.arc(pX + TILE_SIZE/2 + player.dirX*6, pY + TILE_SIZE/2 + player.dirY*6, 2.2, 0, Math.PI*2);
     ctx.fill();
 
-    // 繪製終點
-    let gScreenX = goal.x * tileSize + offsetX;
-    let gScreenY = goal.y * tileSize + offsetY;
+    // 繪製瞄準方向 (紅色準心)
+    ctx.strokeStyle = '#f00';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let aimX = pX + TILE_SIZE/2 + player.aimDirX * 12;
+    let aimY = pY + TILE_SIZE/2 + player.aimDirY * 12;
+    ctx.moveTo(aimX - 3, aimY); ctx.lineTo(aimX + 3, aimY);
+    ctx.moveTo(aimX, aimY - 3); ctx.lineTo(aimX, aimY + 3);
+    ctx.stroke();
+
+    // 鬼
+    let aliveCount = 0;
+    for (let g of ghosts) {
+        g.draw(ctx, offX, offY);
+        if (!g.isDead) aliveCount++;
+    }
+    uiGhostCount.innerText = aliveCount;
+
+    // 終點
+    let gX = goal.x * TILE_SIZE + offX;
+    let gY = goal.y * TILE_SIZE + offY;
     ctx.fillStyle = 'gold';
     ctx.font = '16px Arial';
-    ctx.fillText('🚩', gScreenX, gScreenY + 16);
+    ctx.fillText('\u{1F6A9}', gX, gY + 16);
+
+    // --- Fog of War ---
+    if (!fogCanvas) {
+        fogCanvas = document.createElement('canvas');
+        fogCtx = fogCanvas.getContext('2d');
+    }
+    fogCanvas.width = canvas.width;
+    fogCanvas.height = canvas.height;
+    
+    fogCtx.globalCompositeOperation = 'source-over';
+    fogCtx.fillStyle = '#000';
+    fogCtx.fillRect(0, 0, fogCanvas.width, fogCanvas.height);
+
+    fogCtx.globalCompositeOperation = 'destination-out';
+
+    let cx = pX + TILE_SIZE / 2, cy = pY + TILE_SIZE / 2;
+    let glowR = TILE_SIZE * 5; 
+    let g = fogCtx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+    g.addColorStop(0.00, 'rgba(0,0,0,1)');
+    g.addColorStop(0.60, 'rgba(0,0,0,0.5)'); 
+    g.addColorStop(1.00, 'rgba(0,0,0,0)');
+    fogCtx.fillStyle = g;
+    fogCtx.beginPath();
+    fogCtx.arc(cx, cy, glowR, 0, Math.PI * 2);
+    fogCtx.fill();
+
+    for (let b of bullets) {
+        fogCtx.beginPath();
+        fogCtx.arc(b.x + offX, b.y + offY, 30, 0, Math.PI * 2);
+        fogCtx.fillStyle = 'rgba(0,0,0,1)';
+        fogCtx.fill();
+    }
+
+    ctx.drawImage(fogCanvas, 0, 0);
+
+    // --- 繪製虛擬搖桿 (僅當有觸控時) ---
+    drawJoystick(leftStick, "Move");
+    drawJoystick(rightStick, "Aim");
+}
+
+function drawJoystick(stick, label) {
+    if (!stick.active) return;
+    
+    // 底座
+    ctx.beginPath();
+    ctx.arc(stick.startX, stick.startY, 40, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 搖桿頭
+    ctx.beginPath();
+    ctx.arc(stick.currX, stick.currY, 20, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.fill();
+
+    // 標籤
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, stick.startX, stick.startY + 60);
 }
 
 function gameLoop() {
     updateMic();
+    updateAim(); // 更新瞄準方向
+    updatePlayerMovement(); 
+    updateBullets();
+    
+    for (let g of ghosts) {
+        g.update(player, map);
+        if (g.checkCollision(player)) {
+            alert("Caught by ghost! Game Over.");
+            location.reload();
+            return;
+        }
+    }
+
     draw();
     requestAnimationFrame(gameLoop);
 }
 
-// 啟動按鈕
+// 啟動
 document.getElementById('start-btn').addEventListener('click', () => {
     generateMap();
     initAudio();
 });
+
+// --- 輸入事件監聽 ---
+
+// 1. 鍵盤
+window.addEventListener('keydown', (e) => {
+    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+    if (!activeKeys.includes(e.key)) activeKeys.push(e.key);
+});
+window.addEventListener('keyup', (e) => {
+    activeKeys = activeKeys.filter(key => key !== e.key);
+});
+
+// 2. 滑鼠 (用於瞄準)
+window.addEventListener('mousemove', (e) => {
+    mousePos.x = e.clientX;
+    mousePos.y = e.clientY;
+});
+
+// 3. 觸控 (雙搖桿)
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        
+        // 判斷左半邊還是右半邊
+        if (t.clientX < window.innerWidth / 2) {
+            // 左側移動搖桿
+            if (leftTouchId === null) {
+                leftTouchId = t.identifier;
+                leftStick.startX = t.clientX;
+                leftStick.startY = t.clientY;
+                leftStick.currX = t.clientX;
+                leftStick.currY = t.clientY;
+                leftStick.active = true;
+            }
+        } else {
+            // 右側瞄準搖桿
+            if (rightTouchId === null) {
+                rightTouchId = t.identifier;
+                rightStick.startX = t.clientX;
+                rightStick.startY = t.clientY;
+                rightStick.currX = t.clientX;
+                rightStick.currY = t.clientY;
+                rightStick.active = true;
+            }
+        }
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        
+        if (t.identifier === leftTouchId) {
+            leftStick.currX = t.clientX;
+            leftStick.currY = t.clientY;
+        } 
+        else if (t.identifier === rightTouchId) {
+            rightStick.currX = t.clientX;
+            rightStick.currY = t.clientY;
+        }
+    }
+}, { passive: false });
+
+function endTouch(e) {
+    e.preventDefault();
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        let t = e.changedTouches[i];
+        
+        if (t.identifier === leftTouchId) {
+            leftTouchId = null;
+            leftStick.active = false;
+        } 
+        else if (t.identifier === rightTouchId) {
+            rightTouchId = null;
+            rightStick.active = false;
+        }
+    }
+}
+
+canvas.addEventListener('touchend', endTouch);
+canvas.addEventListener('touchcancel', endTouch);
 
 </script>
 </body>
