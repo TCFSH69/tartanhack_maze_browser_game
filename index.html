@@ -128,6 +128,12 @@ const startBtn = document.getElementById('start-btn');
 const winScreen = document.getElementById('win');
 const loseScreen = document.getElementById('lose');
 
+const playerImg = new Image();
+playerImg.src = 'player.jpg';
+
+const ghostImg = new Image();
+ghostImg.src = 'ghost.jpg';
+
 let map = [];
 let player = { x: 1, y: 1, dirX: 0, dirY: 1, aimDirX: 0, aimDirY: 1, moveTimer: 0 };
 let goal = { x: 0, y: 0 };
@@ -359,13 +365,8 @@ class Ghost {
     draw(ctx, offX, offY) {
         if (this.isDead) return;
         let sx = this.x + offX, sy = this.y + offY;
-        ctx.fillStyle = this.color;
-        ctx.fillRect(sx, sy, this.size, this.size);
-        let ex = this.targetX > this.x ? 2 : this.targetX < this.x ? -2 : 0;
-        let ey = this.targetY > this.y ? 2 : this.targetY < this.y ? -2 : 0;
-        ctx.fillStyle = 'white';
-        ctx.fillRect(sx + 4 + ex, sy + 4 + ey, 5, 5);
-        ctx.fillRect(sx + 10 + ex, sy + 4 + ey, 5, 5);
+
+        ctx.drawImage(ghostImg, sx, sy, this.size, this.size);
     }
 }
 
@@ -566,14 +567,8 @@ function draw() {
     // 玩家
     let pX = player.x * TILE_SIZE + offX;
     let pY = player.y * TILE_SIZE + offY;
-    ctx.fillStyle = '#0f0';
-    ctx.fillRect(pX, pY, TILE_SIZE, TILE_SIZE);
-    
-    // 繪製移動方向
-    ctx.fillStyle = '#000';
-    ctx.beginPath();
-    ctx.arc(pX + TILE_SIZE/2 + player.dirX*6, pY + TILE_SIZE/2 + player.dirY*6, 2.2, 0, Math.PI*2);
-    ctx.fill();
+
+    ctx.drawImage(playerImg, pX, pY, TILE_SIZE, TILE_SIZE);
 
     // 瞄準準心
     let pcx = pX + TILE_SIZE / 2;
